@@ -1,8 +1,9 @@
 -- cc-ai installer
--- In-game:  wget run https://raw.githubusercontent.com/mindbound/cc-ai/main/install.lua
+-- In-game:  wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 -- Options:  install [owner/repo] [branch] [directory]
--- Installs lib/, bin/, docs/, examples/ and tests/ into /cc-ai and adds a
--- startup file that puts cc-code on the shell path.
+-- Installs lib/, bin/, docs/, examples/, tests/ and this installer into
+-- /cc-ai and adds a startup file that puts cc-code on the shell path.
+-- Update later by running /cc-ai/install.
 
 local args = { ... }
 local REPO = args[1] or "mindbound/cc-ai"
@@ -10,8 +11,11 @@ local BRANCH = args[2] or "master"
 local DIR = "/" .. fs.combine(args[3] or "/cc-ai", "")
 local STARTUP = "/startup/cc-ai.lua"
 
--- Top-level entries that belong to an installation
-local INSTALL = { lib = true, bin = true, docs = true, examples = true, tests = true }
+-- Top-level entries (directories and files) that belong to an installation
+local INSTALL = {
+  lib = true, bin = true, docs = true, examples = true, tests = true,
+  ["install.lua"] = true,
+}
 
 if not http then
   printError("The HTTP API is disabled. Enable it in the ComputerCraft config.")
@@ -41,7 +45,7 @@ end
 
 local files = {}
 for _, entry in ipairs(tree.tree) do
-  local top = entry.path:match("^([^/]+)/")
+  local top = entry.path:match("^[^/]+")
   if entry.type == "blob" and top and INSTALL[top] then
     table.insert(files, entry.path)
   end
@@ -84,7 +88,7 @@ if not ok then
   error(err, 0)
 end
 
--- Replace the previous install's managed directories (removes stale files)
+-- Replace the previous install's managed entries (removes stale files)
 fs.makeDir(DIR)
 for name in pairs(INSTALL) do
   local path = fs.combine(DIR, name)
@@ -112,7 +116,7 @@ shell.setCompletionFunction(fs.combine(binDir, "cc-code.lua"), function(_, index
 end)
 ]]):format(binDir)
 
-print("Installed " .. #files .. " files.")
+print("Installed " .. #files .. " files. Update later with: " .. fs.combine(DIR, "install"))
 
 if fs.exists("/startup") and not fs.isDir("/startup") then
   -- A plain /startup file exists, so there is no startup directory to add to

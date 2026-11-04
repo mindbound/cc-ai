@@ -27,7 +27,7 @@ YouTube: https://youtu.be/u-gIQOXLimQ
 ### Installation
 
 ```
-wget run https://raw.githubusercontent.com/mindbound/cc-ai/main/install.lua
+wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
 This installs everything into `/cc-ai` and adds `/startup/cc-ai.lua`, which puts `cc-code` on the shell path.
@@ -145,10 +145,10 @@ print(result.object.name, result.object.age)
 ### Installer (Recommended)
 
 ```
-wget run https://raw.githubusercontent.com/mindbound/cc-ai/main/install.lua
+wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
-Run it again to update. To install from a fork, a branch or another directory, use `install [owner/repo] [branch] [directory]`.
+Update later with `/cc-ai/install` (the installer installs itself), or by running the `wget` command again. To install from a fork, a branch or another directory, use `install [owner/repo] [branch] [directory]`.
 
 ### Manual
 

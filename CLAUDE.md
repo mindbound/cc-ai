@@ -10,7 +10,7 @@ This is a ComputerCraft: Tweaked (CC:T) Lua library for Minecraft 1.21.1, not a 
 
 In-game:
 ```
-wget run https://raw.githubusercontent.com/mindbound/cc-ai/main/install.lua
+wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 `install.lua` lists the repo through the GitHub trees API, downloads `lib/ bin/ docs/ examples/ tests/` into `/cc-ai`, and writes `/startup/cc-ai.lua`, which adds `/cc-ai/bin` to the shell path. The repo layout is the installed layout.
 

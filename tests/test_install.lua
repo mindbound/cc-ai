@@ -42,8 +42,10 @@ return function(T)
       ["bin/cc-code.lua"] = "print('hi')",
       ["docs/turtle.md"] = "# Turtle API",
       ["tests/run.lua"] = "-- tests",
+      ["install.lua"] = "-- installer",
     })
     install(dir)
+    T.eq(T.readFile(dir .. "/install.lua"), "-- installer", "installer installs itself for updates")
     T.eq(T.readFile(dir .. "/lib/ai/init.lua"), "return {}")
     T.eq(T.readFile(dir .. "/bin/cc-code.lua"), "print('hi')")
     T.eq(T.readFile(dir .. "/docs/turtle.md"), "# Turtle API")
