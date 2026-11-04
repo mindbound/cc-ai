@@ -23,11 +23,50 @@ return function(T)
     T.eq(text.toCC("bad \233 byte"), "bad \233 byte")           -- invalid UTF-8 kept
   end)
 
+  T.test("text.byteLen counts bytes (with or without a unicode mod)", function()
+    T.eq(text.byteLen(""), 0)
+    T.eq(text.byteLen("abc"), 3)
+    T.eq(text.byteLen("\226\128\148"), 3, "em dash")
+    T.eq(text.byteLen("caf\195\169 \226\128\148 17 \194\176C"), 16)
+    T.eq(text.byteLen("a\0b"), 3, "embedded zero")
+    T.eq(text.byteLen(("x"):rep(5):sub(2) .. "yz"), 6, "derived strings (CraftOS-PC's rawlen says 0)")
+  end)
+
   T.test("text.fromCC converts CC Latin-1 bytes to UTF-8", function()
     T.eq(text.fromCC("plain"), "plain")
     T.eq(text.fromCC("caf\233"), "caf\195\169")
     T.eq(text.fromCC("caf\195\169"), "caf\195\169")             -- already UTF-8
     T.eq(text.fromCC("box\140"), "box?")                        -- drawing char
+    -- Unicode-mod input mixes both: é as one byte, an em dash as UTF-8
+    T.eq(text.fromCC("caf\233\226\128\148ok"), "caf\195\169\226\128\148ok")
+    T.eq(text.fromCC("a\tb\r"), "a\tb\r")
+  end)
+
+  T.test("text width/sub count cells; forDisplay depends on the unicode mod", function()
+    local s = "caf\233 \226\128\148 ok"                          -- é as Latin-1, em dash as UTF-8
+    -- Vanilla: one byte per cell
+    T.eq(text.unicodeTerminal(), false)
+    T.eq(text.width(s), 11)
+    T.eq(text.sub(s, 5, 7), " \226\128")
+    T.eq(text.forDisplay("a \226\128\148 b\t!\r"), "a - b  !")
+    -- With the mod: one cell per character, UTF-8 is kept for display
+    T.withUnicodeMod(function()
+      T.eq(text.unicodeTerminal(), true)
+      T.eq(text.width(s), 9)
+      T.eq(text.sub(s, 5, 7), " \226\128\148 ")
+      T.eq(text.sub(s, -2), "ok")
+      T.eq(text.byteLen(s), 11, "byteLen is still bytes")
+      T.eq(text.forDisplay("a \226\128\148 b\t!\r"), "a \226\128\148 b  !")
+    end)
+    T.eq(text.unicodeTerminal(), false, "simulation removed")
+  end)
+
+  T.test("json decodes UTF-8 text regardless of string length semantics", function()
+    local json = require("cmn-utils.json")
+    local doc = "{\"t\":\"caf\195\169 \226\128\148 17 \194\176C\",\"n\":null}"
+    local v = json.decode(doc)
+    T.eq(v.t, "caf\195\169 \226\128\148 17 \194\176C")
+    T.eq(v.n, nil)
   end)
 
   T.resetTmp()

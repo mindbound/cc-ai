@@ -138,7 +138,7 @@ function utils.decodeJSON(text)
   end
   local tail = text:sub(-60):gsub("%s+", " ")
   error(("Could not parse the API response (%d bytes; it may have been cut short). It ends with: %s")
-    :format(#text, tail), 0)
+    :format(select(2, text:find("$")), tail), 0)
 end
 
 function utils.parseSSELine(line)

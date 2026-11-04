@@ -152,6 +152,67 @@ function mock.sse(events, done)
   return table.concat(lines)
 end
 
+-- Simulated "CC: Tweaked Unicode Support" mod ---------------------------------
+-- The mod adds a global `unicode` table whose len/sub count characters: a
+-- well-formed UTF-8 sequence is one character, any other byte is one
+-- character on its own. (It also changes # in the Lua VM, which can't be
+-- simulated here; cc-ai code must not use # on strings for byte work.)
+
+local function seqLen(s, i, n)
+  local b = s:byte(i)
+  local len
+  if b >= 0xC2 and b <= 0xDF then len = 2
+  elseif b >= 0xE0 and b <= 0xEF then len = 3
+  elseif b >= 0xF0 and b <= 0xF4 then len = 4
+  else return 1 end
+  if i + len - 1 > n then return 1 end
+  local second = s:byte(i + 1)
+  if (b == 0xE0 and second < 0xA0) or (b == 0xED and second > 0x9F)
+    or (b == 0xF0 and second < 0x90) or (b == 0xF4 and second > 0x8F) then
+    return 1
+  end
+  for j = i + 1, i + len - 1 do
+    local c = s:byte(j)
+    if c < 0x80 or c > 0xBF then return 1 end
+  end
+  return len
+end
+
+-- Byte offsets where each character starts
+local function charStarts(s)
+  local starts, i, n = {}, 1, select(2, s:find("$"))
+  while i <= n do
+    starts[#starts + 1] = i
+    i = i + seqLen(s, i, n)
+  end
+  return starts, n
+end
+
+local fakeUnicode = {
+  len = function(s)
+    return #(charStarts(s))
+  end,
+  sub = function(s, i, j)
+    local starts, n = charStarts(s)
+    local count = #starts
+    i = i or 1
+    j = j or -1
+    if i < 0 then i = math.max(count + i + 1, 1) elseif i == 0 then i = 1 end
+    if j < 0 then j = count + j + 1 elseif j > count then j = count end
+    if i > j then return "" end
+    local last = (starts[j + 1] or (n + 1)) - 1
+    return s:sub(starts[i], last)
+  end,
+}
+
+-- Run fn with the simulated mod installed (a global `unicode` table)
+function T.withUnicodeMod(fn)
+  unicode = fakeUnicode
+  local ok, err = pcall(fn)
+  unicode = nil
+  if not ok then error(err, 0) end
+end
+
 -- Filesystem scratch area --------------------------------------------------
 
 T.tmp = "/cc-ai-test-tmp"

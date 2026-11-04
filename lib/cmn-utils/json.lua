@@ -24,6 +24,16 @@
 
 local json = { _version = "0.1.2" }
 
+-- cc-ai change: string lengths are taken in bytes with string.find. Mods
+-- such as "CC: Tweaked Unicode Support" make # and string.len count UTF-8
+-- characters (and in O(n)), while string.sub/byte/find still index bytes,
+-- so a decoder bounded by # stops early on non-ASCII text. (Not rawlen:
+-- the CraftOS-PC emulator's rawlen returns 0 for strings made by sub/"..".)
+local function byteLen(s)
+  local _, last = s:find("$")
+  return last
+end
+
 -------------------------------------------------------------------------------
 -- Encode
 -------------------------------------------------------------------------------
@@ -162,13 +172,16 @@ local literal_map = {
 }
 
 
+-- Byte length of the string being decoded (set by json.decode)
+local strLen = 0
+
 local function next_char(str, idx, set, negate)
-  for i = idx, #str do
+  for i = idx, strLen do
     if set[str:sub(i, i)] ~= negate then
       return i
     end
   end
-  return #str + 1
+  return strLen + 1
 end
 
 
@@ -220,7 +233,7 @@ local function parse_string(str, i)
   local j = i + 1
   local k = j
 
-  while j <= #str do
+  while j <= strLen do
     local x = str:byte(j)
 
     if x < 32 then
@@ -376,9 +389,10 @@ function json.decode(str)
   if type(str) ~= "string" then
     error("expected argument of type string, got " .. type(str))
   end
+  strLen = byteLen(str)
   local res, idx = parse(str, next_char(str, 1, space_chars, true))
   idx = next_char(str, idx, space_chars, true)
-  if idx <= #str then
+  if idx <= strLen then
     decode_error(str, idx, "trailing garbage")
   end
   return res

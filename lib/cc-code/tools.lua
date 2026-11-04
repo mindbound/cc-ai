@@ -6,6 +6,7 @@ local cmnGlob = require("cmn-utils.glob")
 local cmnGrep = require("cmn-utils.grep")
 local cmnPath = require("cmn-utils.path")
 local capture = require("cc-code.capture")
+local byteLen = require("cmn-utils.text").byteLen
 
 local tools = {}
 
@@ -127,7 +128,7 @@ tools.write_file = ai.tool({
     if not ok then
       return { error = "Cannot write to file: " .. path .. (err and (" (" .. err .. ")") or "") }
     end
-    return { success = true, path = path, bytesWritten = #args.content }
+    return { success = true, path = path, bytesWritten = byteLen(args.content) }
   end,
 })
 
@@ -171,7 +172,7 @@ tools.edit_file = ai.tool({
       local found = content:find(args.old_string, pos, true)
       if not found then break end
       count = count + 1
-      pos = found + #args.old_string
+      pos = found + byteLen(args.old_string)
     end
 
     if count == 0 then
@@ -192,7 +193,7 @@ tools.edit_file = ai.tool({
       )
     else
       local idx = content:find(args.old_string, 1, true)
-      newContent = content:sub(1, idx - 1) .. args.new_string .. content:sub(idx + #args.old_string)
+      newContent = content:sub(1, idx - 1) .. args.new_string .. content:sub(idx + byteLen(args.old_string))
     end
 
     local ok, err = writeFile(path, newContent)
@@ -319,7 +320,7 @@ tools.shell = ai.tool({
       command = args.command,
       output = output:sub(1, 4000),
       success = success,
-      truncated = #output > 4000,
+      truncated = byteLen(output) > 4000,
     }
   end,
 })

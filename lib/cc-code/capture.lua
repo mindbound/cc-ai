@@ -5,6 +5,10 @@
 
 local capture = {}
 
+-- Byte length: positions in the recorded lines are bytes, also under mods
+-- that make # count UTF-8 characters
+local byteLen = require("cmn-utils.text").byteLen
+
 -- Optional { before = fn, after = fn }, called around every command
 capture.hooks = nil
 
@@ -26,7 +30,7 @@ function capture.createTerminal(width, height, parent)
   local function put(str)
     str = tostring(str)
     local x = cursorX
-    cursorX = cursorX + #str
+    cursorX = cursorX + byteLen(str)
     if cursorY < 1 or cursorY > height then return end
     -- Clip to the visible columns, like a real terminal
     if x < 1 then
@@ -36,10 +40,11 @@ function capture.createTerminal(width, height, parent)
     if x > width then return end
     str = str:sub(1, width - x + 1)
     local line = lines[cursorY] or ""
-    if #line < x - 1 then
-      line = line .. string.rep(" ", x - 1 - #line)
+    local lineLen = byteLen(line)
+    if lineLen < x - 1 then
+      line = line .. string.rep(" ", x - 1 - lineLen)
     end
-    lines[cursorY] = line:sub(1, x - 1) .. str .. line:sub(x + #str)
+    lines[cursorY] = line:sub(1, x - 1) .. str .. line:sub(x + byteLen(str))
   end
 
   function t.write(str) put(str) end

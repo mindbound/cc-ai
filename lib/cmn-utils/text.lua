@@ -1,9 +1,97 @@
 -- cmn-utils/text.lua
--- Conversion between UTF-8 (what AI APIs send and expect) and the
--- ComputerCraft terminal charset (one byte per glyph: ASCII, CC drawing
--- characters at 128-159, ISO-8859-1 at 160-255).
+-- Text handling for the CC terminal:
+--   byteLen          byte length that stays right when a mod changes #
+--   width, sub       screen width and cell-indexed substrings
+--   forDisplay       model output (UTF-8) -> what the terminal can show
+--   toCC, fromCC     UTF-8 <-> the vanilla CC charset
+--
+-- Vanilla CC: Tweaked draws one byte per cell: ASCII, CC drawing
+-- characters at 128-159 and ISO-8859-1 at 160-255. UTF-8 is converted to
+-- that charset for display.
+--
+-- The "CC: Tweaked Unicode Support" mod makes the terminal draw UTF-8 (one
+-- cell per character, lone bytes 160-255 still as Latin-1) and adds a
+-- global `unicode` table (len, sub, ...). It also makes # and string.len
+-- count UTF-8 characters, while string.sub/byte/find stay byte-based, so
+-- byte work must use byteLen, and display work width/sub.
 
 local text = {}
+
+-- Byte length. string.find still works on bytes under the unicode mod.
+-- (rawlen would be O(1) and is unchanged by the mod, but the CraftOS-PC
+-- emulator's rawlen returns 0 for strings made by sub or "..".)
+local function rawlen(s)
+  local _, last = s:find("$")
+  return last
+end
+
+-- The mod's helpers when installed. Looked up on every call: it's cheap,
+-- and it lets tests simulate the mod with a fake `unicode` table.
+local function unicodeLib()
+  local u = unicode
+  if type(u) == "table" and type(u.len) == "function" and type(u.sub) == "function" then
+    return u
+  end
+  return nil
+end
+
+-- True when the terminal draws UTF-8 (the unicode mod is installed)
+function text.unicodeTerminal()
+  return unicodeLib() ~= nil
+end
+
+-- Length in bytes, for byte positions (string.sub, byte, find)
+function text.byteLen(s)
+  return rawlen(s)
+end
+
+-- Width on screen in cells
+function text.width(s)
+  local u = unicodeLib()
+  if u then
+    return u.len(s)
+  end
+  return rawlen(s)
+end
+
+-- Substring by cells (same arguments as string.sub)
+function text.sub(s, i, j)
+  local u = unicodeLib()
+  if u then
+    return u.sub(s, i, j)
+  end
+  return string.sub(s, i, j)
+end
+
+-- Decode one UTF-8 sequence at byte i (same rules as the unicode mod and
+-- Lua 5.3: no overlong forms, surrogates or values above U+10FFFF).
+-- Returns codepoint and byte length, or nil if the bytes there are not a
+-- complete, well-formed sequence.
+local function decodeAt(str, i, n)
+  local b = str:byte(i)
+  local len, cp
+  if b >= 0xC2 and b <= 0xDF then
+    len, cp = 2, b - 0xC0
+  elseif b >= 0xE0 and b <= 0xEF then
+    len, cp = 3, b - 0xE0
+  elseif b >= 0xF0 and b <= 0xF4 then
+    len, cp = 4, b - 0xF0
+  else
+    return nil
+  end
+  if i + len - 1 > n then return nil end
+  local second = str:byte(i + 1)
+  if (b == 0xE0 and second < 0xA0) or (b == 0xED and second > 0x9F)
+    or (b == 0xF0 and second < 0x90) or (b == 0xF4 and second > 0x8F) then
+    return nil
+  end
+  for j = i + 1, i + len - 1 do
+    local c = str:byte(j)
+    if c < 0x80 or c > 0xBF then return nil end
+    cp = cp * 64 + (c - 0x80)
+  end
+  return cp, len
+end
 
 -- Characters outside ISO-8859-1 that models commonly emit, mapped to ASCII
 local replacements = {
@@ -41,75 +129,91 @@ local function mapCodepoint(cp)
   return "?"
 end
 
--- Convert UTF-8 text to something the CC terminal can display.
--- Bytes that are not part of a valid UTF-8 sequence are kept as-is (they are
--- most likely already CC charset). Tabs become two spaces, CR is dropped.
+-- Walk a string: ASCII runs are copied in one piece, every other position
+-- is handed to onByte(i, n, out), which appends to out and returns the
+-- number of bytes it consumed
+local function walk(str, onByte)
+  local out = {}
+  local i, n = 1, rawlen(str)
+  while i <= n do
+    local nextHigh = str:find("[\128-\255\t\r]", i)
+    if not nextHigh then
+      out[#out + 1] = str:sub(i)
+      break
+    end
+    if nextHigh > i then
+      out[#out + 1] = str:sub(i, nextHigh - 1)
+    end
+    i = nextHigh + onByte(nextHigh, n, out)
+  end
+  return table.concat(out)
+end
+
+-- Convert UTF-8 text to the vanilla CC charset. Bytes that are not part of
+-- a valid UTF-8 sequence are kept as-is (they are most likely already CC
+-- charset). Tabs become two spaces, CR is dropped.
 function text.toCC(str)
   str = tostring(str)
   if not str:find("[\128-\255\t\r]") then
     return str
   end
-  local out = {}
-  local i, n = 1, #str
-  while i <= n do
+  return walk(str, function(i, n, out)
     local b = str:byte(i)
-    if b < 0x80 then
-      if b == 9 then
-        out[#out + 1] = "  "
-      elseif b ~= 13 then
-        out[#out + 1] = string.char(b)
-      end
-      i = i + 1
-    else
-      local len, cp = 0, nil
-      if b >= 0xC2 and b <= 0xDF then
-        len, cp = 2, b - 0xC0
-      elseif b >= 0xE0 and b <= 0xEF then
-        len, cp = 3, b - 0xE0
-      elseif b >= 0xF0 and b <= 0xF4 then
-        len, cp = 4, b - 0xF0
-      end
-      local valid = len > 0 and i + len - 1 <= n
-      if valid then
-        for j = i + 1, i + len - 1 do
-          local c = str:byte(j)
-          if c < 0x80 or c > 0xBF then
-            valid = false
-            break
-          end
-          cp = cp * 64 + (c - 0x80)
-        end
-      end
-      if valid then
-        out[#out + 1] = mapCodepoint(cp)
-        i = i + len
-      else
-        out[#out + 1] = string.char(b)
-        i = i + 1
-      end
+    if b == 9 then
+      out[#out + 1] = "  "
+      return 1
+    elseif b == 13 then
+      return 1
     end
-  end
-  return table.concat(out)
+    local cp, len = decodeAt(str, i, n)
+    if cp then
+      out[#out + 1] = mapCodepoint(cp)
+      return len
+    end
+    out[#out + 1] = string.char(b)
+    return 1
+  end)
 end
 
--- Convert CC charset text (typed or pasted on the computer) to UTF-8 so it
--- can be sent in JSON. Valid UTF-8 input is returned unchanged.
+-- Prepare model output (UTF-8) for the terminal: kept as UTF-8 when the
+-- terminal can draw it (unicode mod), converted to the CC charset otherwise
+function text.forDisplay(str)
+  str = tostring(str)
+  if text.unicodeTerminal() then
+    return (str:gsub("\t", "  "):gsub("\r", ""))
+  end
+  return text.toCC(str)
+end
+
+-- Convert text from the computer (typed, pasted, files, program output) to
+-- UTF-8 so it can be sent in JSON. Valid UTF-8 sequences are kept; other
+-- bytes are CC charset: 160-255 are ISO-8859-1, 128-159 (CC drawing
+-- characters) have no equivalent and become "?". With the unicode mod,
+-- typed text mixes both (é arrives as one byte, an em dash as UTF-8).
 function text.fromCC(str)
   str = tostring(str)
   if not str:find("[\128-\255]") then
     return str
   end
-  if utf8 and utf8.len and utf8.len(str) then
-    return str -- already valid UTF-8
-  end
-  return (str:gsub("[\128-\255]", function(c)
-    local b = c:byte()
+  return walk(str, function(i, n, out)
+    local b = str:byte(i)
+    if b < 0x80 then
+      out[#out + 1] = string.char(b) -- tab or CR: keep
+      return 1
+    end
+    local cp, len = decodeAt(str, i, n)
+    if cp then
+      out[#out + 1] = str:sub(i, i + len - 1)
+      return len
+    end
     if b >= 0xA0 then
       -- ISO-8859-1 codepoint -> 2-byte UTF-8
-      return string.char(0xC0 + math.floor(b / 64), 0x80 + (b % 64))
+      out[#out + 1] = string.char(0xC0 + math.floor(b / 64), 0x80 + (b % 64))
+    else
+      out[#out + 1] = "?"
     end
-    return "?" -- CC drawing characters have no UTF-8 equivalent
-  end))
+    return 1
+  end)
 end
 
 return text
