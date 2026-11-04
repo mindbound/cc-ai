@@ -4,175 +4,58 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment
 
-This is a Minecraft OpenComputers Lua library, not a typical software project. Code runs inside the OpenComputers Lua 5.2-ish runtime with access to OC-specific APIs (`component`, `internet`, `filesystem`, etc.). The working directory is the OC save path on a Windows host.
+This is a ComputerCraft: Tweaked (CC:T) Lua library for Minecraft 1.21.1, not a typical software project. Code runs inside CraftOS on the Cobalt VM (Lua 5.2 with a few 5.3 stdlib additions such as `utf8`). CC APIs are globals (`fs`, `term`, `http`, `settings`, `shell`, `turtle`, ...), not `require`d modules. It's a port of the OpenComputers project oc-ai; the first commit in git history is the untouched OC version.
 
-## Installation (OPPM)
+## Installation
 
-Register and install via OPPM:
+In-game:
 ```
-oppm register DonChong2000/oc-ai
-oppm install ai
+wget run https://raw.githubusercontent.com/DonChong2000/cc-ai/main/install.lua
 ```
+`install.lua` lists the repo through the GitHub trees API, downloads `lib/ bin/ docs/ examples/ tests/` into `/cc-ai`, and writes `/startup/cc-ai.lua`, which adds `/cc-ai/bin` to the shell path. The repo layout is the installed layout.
 
 ## Running Code
 
-Run Lua scripts from the in-game OpenComputers shell:
+From the CraftOS shell, run programs by path. There's no `lua <file>`:
 ```
-lua examples/generateText.lua
+cc-code
+/cc-ai/examples/generateText
 ```
 
-Example scripts are in `examples/`. API keys are loaded from environment variables.
+Each CraftOS program gets its own `require`, which resolves relative paths against the program's own directory. Entry points therefore prepend the lib dir to `package.path`, for example `"../lib/?.lua;../lib/?/init.lua;"` in `bin/` and `examples/`, or an absolute `/cc-ai/lib/...` path in user programs. Modules loaded by `require` share the program's environment, so they see `shell` and any overridden globals. `dofile` runs in `_G`, which has no `require`, so use `loadfile(path, "t", _ENV)` instead.
+
+API keys are settings, not env vars: `set GOOGLE_GENERATIVE_AI_API_KEY <key>`. Read them through `ai.utils.getEnv(name)`.
+
+## Testing
+
+Offline suite with a fake `http` (no keys or network needed), run in the CraftOS-PC emulator:
+```
+.\tests\run.ps1                 # all suites
+.\tests\run.ps1 -Suite test_ai  # one suite
+```
+The runner mounts the repo read-only at `/cc-ai` in a headless emulator, runs `tests/run.lua`, and prints the results file. Headless stdout is a garbled screen dump, so tests write results to a file. Suites are `tests/test_*.lua`, each a `function(T)` using `T.test/T.eq/T.contains/T.raises` and `T.http` (mock: `push` responses for POST, `routes` for GET). In-game: `/cc-ai/tests/run [suite]`.
 
 ## Architecture
 
-**lib/ai/init.lua** - Main AI SDK providing `ai.generateText()` and `ai.streamText()`:
-- Supports Vercel AI Gateway (string models) and direct providers (model objects)
+**lib/ai/init.lua** - Main AI SDK: `ai.generateText()`, `ai.streamText()`, `ai.generateObject()`, `ai.tool()`
+- Vercel AI Gateway (string models) and direct providers (model objects)
 - Tool calling with automatic execution loop (`maxSteps`)
 - Structured output via `ai.Output.object()`
-- Returns `{ text, output, finishReason, usage, toolResults, response }`
 
-**lib/ai/google.lua** - Google Generative AI provider:
-- Direct access to Google's API
-- Env: `GOOGLE_GENERATIVE_AI_API_KEY`
+**lib/ai/utils/init.lua** - `httpPost`, `httpPostStream` (line iterator over the buffered body: CC:T has no live HTTP streaming), `parseSSELine`, `getEnv` (settings), `defineSetting`. Non-2xx responses raise with the API's error message.
 
-**lib/ai/openai.lua** - OpenAI provider:
-- Direct access to OpenAI's API
-- Env: `OPENAI_API_KEY`
+**lib/ai/google.lua**, **openai.lua**, **groq.lua**, **vercel.lua** - providers. The last three are built on **openai-compat.lua**.
 
-**lib/ai/groq.lua** - Groq provider:
-- Direct access to Groq's API (OpenAI-compatible)
-- Env: `GROQ_API_KEY`
+**lib/cmn-utils/** - `json` (rxi/json.lua), `glob`, `grep`, `path` (resolve against `shell.dir()`, yield helper), `text` (UTF-8 to CC charset for display, `fromCC` for user input going to APIs).
 
-**lib/ai/vercel.lua** - Vercel AI Gateway provider:
-- Routes to multiple providers via gateway
-- Env: `AI_GATEWAY_API_KEY`
+**lib/cc-code/** - the agent:
+- `agent.lua` - system prompt, slash commands, `!cmd`, tool-call loop with history
+- `tools.lua` - read_file, write_file, edit_file, list_directory, glob, grep, shell
+- `capture.lua` - runs shell commands under `term.redirect` to a recording terminal, because CraftOS has no `>` redirection
+- `tui.lua` - full-screen UI (window-buffered, palette remapped to the theme). `terminal.lua` - line mode using `read()`
+- `skills/` - help, model, turtle. Loaded by `skills.loadFromDirectory` from the module's own directory
 
-**lib/ai/utils/init.lua** - Shared utilities:
-- `httpPost`, `httpPostStream`, `parseSSELine`
-
-**lib/ai/utils/json.lua** - JSON codec (rxi/json.lua)
-
-**examples/** - Example scripts:
-- `generateText.lua` - Basic text generation (gateway)
-- `streamText.lua` - Streaming text generation
-- `toolCalling.lua` - Tool/function calling
-- `multistepToolCalling.lua` - Multi-step tool calling
-- `generateStructuredOutput.lua` - Structured JSON output (using Output.object)
-- `generateObject.lua` - Structured output with generateObject
-- `simpleChatbot.lua` - Multi-turn conversation
-- `Google/generateText.lua` - Using Google provider
-- `OpenAI/generateText.lua` - Using OpenAI provider
-- `Groq/generateText.lua` - Using Groq provider
-
-## API Usage
-
-### generateText (Gateway)
-```lua
-local ai = require("ai")
-
-local result = ai.generateText({
-  model = "google/gemini-2.5-flash",  -- provider/model format
-  prompt = "Hello",                    -- or use messages = {...}
-  system = "You are helpful.",         -- optional
-  maxOutputTokens = 100,
-  temperature = 0.7,
-  maxSteps = 5,                        -- for multi-step tool calls
-})
-
-print(result.text)
-```
-
-### generateText (Provider)
-```lua
-local ai = require("ai")
-local google = require("ai.google")
-
-local result = ai.generateText({
-  model = google("gemini-2.5-flash"),
-  prompt = "Hello",
-})
-```
-
-### streamText
-```lua
-local ai = require("ai")
-
-ai.streamText({
-  model = "openai/gpt-4o-mini",
-  prompt = "Tell me a story",
-  onChunk = function(chunk)
-    if chunk.type == "text" then
-      io.write(chunk.text)
-    end
-  end,
-  onFinish = function(result)
-    print("\nDone: " .. result.finishReason)
-  end,
-})
-```
-
-### generateObject
-```lua
-local ai = require("ai")
-
-local result = ai.generateObject({
-  model = "openai/gpt-4o-mini",
-  schema = {
-    type = "object",
-    properties = {
-      name = { type = "string" },
-      age = { type = "number" },
-    },
-  },
-  prompt = "Generate a person.",
-})
-
-print(result.object.name)  -- direct access to parsed object
-```
-
-### Structured Output (alternative)
-```lua
--- Using generateText with Output.object
-local result = ai.generateText({
-  model = "openai/gpt-4o-mini",
-  output = ai.Output.object({ schema = { ... } }),
-  prompt = "Generate a person.",
-})
-
-print(result.output.name)
-```
-
-### Tool Helper
-```lua
-local weatherTool = ai.tool({
-  name = "get_weather",
-  description = "Get the weather in a location",
-  parameters = {
-    type = "object",
-    properties = {
-      location = { type = "string" },
-    },
-    required = { "location" },
-  },
-  execute = function(args)
-    return { temperature = 72, condition = "sunny" }
-  end,
-})
-
-local result = ai.generateText({
-  model = "openai/gpt-4o-mini",
-  prompt = "What's the weather in Paris?",
-  tools = { weatherTool },
-  maxSteps = 3,
-})
-```
-
-## Environment Variables
-
-- `AI_GATEWAY_API_KEY` - For gateway (string models)
-- `GOOGLE_GENERATIVE_AI_API_KEY` - For Google provider
-- `OPENAI_API_KEY` - For OpenAI provider
-- `GROQ_API_KEY` - For Groq provider
+**bin/cc-code.lua** - entry program (option parsing). **install.lua** - installer.
 
 ## Code Style
 
@@ -182,11 +65,13 @@ local result = ai.generateText({
 - Modules return tables of public functions
 - Use `type()` checks for public API arguments
 - Wrap JSON decode with `pcall`
-- Use `error("message")` for failures
+- Use `error("message")` for failures (`error(msg, 0)` for user-facing messages without a position)
 
 ## Constraints
 
-- OC Lua 5.2 subset (no full Lua 5.3+ features)
-- Limited memory - avoid large buffers
-- Network via `require("internet")` with internet card
-- No external package manager or build system
+- Lua 5.2 (Cobalt): no `//`, no bitwise operators (use `bit32`), no `string.pack`. `goto` and `utf8` work
+- Programs must yield at least every ~7s ("Too long without yielding"). Long scans call `cmn-utils.path.maybeYield()`
+- Compare key events against `keys.*` names only: MC 1.21 uses GLFW key codes, while CraftOS-PC uses LWJGL2 codes
+- Terminal is one byte per glyph (ISO-8859-1 plus CC drawing chars), not UTF-8. Pass displayed model text through `cmn-utils.text.toCC`
+- Screens are small: 51x19 computer, 39x13 turtle, 26x20 pocket
+- Read and write files in binary mode (`"rb"` / `"wb"`) to keep bytes intact

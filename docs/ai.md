@@ -1,14 +1,25 @@
 # ai - Core SDK
 
-AI SDK for OpenComputers Lua - generate text, stream responses, use tools, and get structured output.
+AI SDK for ComputerCraft: Tweaked Lua - generate text, stream responses, use tools, and get structured output.
 
 Inspired by the [Vercel AI SDK](https://sdk.vercel.ai/).
+
+## Using the library
+
+CraftOS gives each program its own `require`, so add the cc-ai libraries to `package.path` at the top of your program:
+
+```lua
+package.path = "/cc-ai/lib/?.lua;/cc-ai/lib/?/init.lua;" .. package.path
+local ai = require("ai")
+```
+
+API keys are read from the settings API. Set them in the shell with `set <NAME> <key>`, or in code with `settings.set(name, key)`.
 
 ## Providers
 
 ### Vercel AI Gateway (default)
 
-Use `provider/model` string format. Requires `AI_GATEWAY_API_KEY` env var.
+Use `provider/model` string format. Requires the `AI_GATEWAY_API_KEY` setting.
 
 ```lua
 local ai = require("ai")
@@ -21,7 +32,7 @@ ai.generateText({
 
 ### Google Generative AI
 
-Direct access to Google's API. Requires `GOOGLE_GENERATIVE_AI_API_KEY` env var.
+Direct access to Google's API. Requires the `GOOGLE_GENERATIVE_AI_API_KEY` setting.
 
 ```lua
 local ai = require("ai")
@@ -35,7 +46,7 @@ ai.generateText({
 
 ### OpenAI
 
-Direct access to OpenAI's API. Requires `OPENAI_API_KEY` env var.
+Direct access to OpenAI's API. Requires the `OPENAI_API_KEY` setting.
 
 ```lua
 local ai = require("ai")
@@ -68,7 +79,7 @@ print(result.finishReason)  -- "stop", "length", "tool_calls", etc.
 
 ### streamText
 
-Stream text chunks as they arrive.
+Receive the response as text chunks through `onChunk`. CC: Tweaked downloads the whole HTTP response before a program can read it, so all the chunks arrive together when the response completes.
 
 ```lua
 ai.streamText({
@@ -136,17 +147,22 @@ local result = ai.generateText({
 
 ## Examples
 
-Run examples from the OpenComputers shell:
+Run examples from the CraftOS shell:
 
 ```
-lua examples/generateText.lua
-lua examples/streamText.lua
-lua examples/toolCalling.lua
-lua examples/generateObject.lua
+/cc-ai/examples/generateText
+/cc-ai/examples/streamText
+/cc-ai/examples/toolCalling
+/cc-ai/examples/generateObject
+/cc-ai/examples/runAll
 ```
 
-## Environment Variables
+## Settings
 
 - `AI_GATEWAY_API_KEY` - For Vercel AI Gateway (string models)
 - `GOOGLE_GENERATIVE_AI_API_KEY` - For Google provider
 - `OPENAI_API_KEY` - For OpenAI provider
+- `GROQ_API_KEY` - For Groq provider
+- `ai.http_timeout` - HTTP timeout in seconds (default 120)
+
+If requests fail with "Timed out", the server's own HTTP limits may also need raising: see the `http` section of `computercraft-server.toml`.

@@ -29,5 +29,6 @@ if (-not (Test-Path $results)) {
 }
 $text = Get-Content $results -Raw
 Write-Output $text
-if ($text -match "FAILED|runner crashed") { exit 1 }
+# -cmatch: case-sensitive, so the "0 failed" summary doesn't count
+if ($text -cmatch "(?m)^(FAILED |runner crashed)") { exit 1 }
 exit 0

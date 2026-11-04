@@ -16,14 +16,14 @@ local T = loadfile(root .. "/tests/harness.lua", "t", _ENV)()
 -- Swap in the fake HTTP API. Required modules share this program's
 -- environment, so they see it too. Keep settings changes in memory only.
 local realHttp = http
-http = { post = T.http.post, checkURL = function() return true end }
+http = { post = T.http.post, get = T.http.get, checkURL = function() return true end }
 
 local savedSettings = {}
 for _, name in ipairs({ "AI_GATEWAY_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY" }) do
   savedSettings[name] = settings.get(name)
 end
 
-local suites = { "test_files", "test_capture", "test_ai", "test_agent", "test_ui" }
+local suites = { "test_files", "test_capture", "test_ai", "test_agent", "test_install", "test_ui" }
 local only = args[1]
 
 for _, name in ipairs(suites) do

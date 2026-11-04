@@ -95,6 +95,7 @@ end
 function mock.reset()
   mock.queue = {}
   mock.requests = {}
+  mock.routes = {}
 end
 
 -- The last request, with its JSON body decoded
@@ -121,6 +122,18 @@ function mock.post(req, body, headers)
     return nil, resp.reason or "HTTP error", handle
   end
   return handle
+end
+
+-- http.get: answered from mock.routes[url] (a string body), else 404
+mock.routes = {}
+function mock.get(req, headers, binary)
+  local url = type(req) == "table" and req.url or req
+  table.insert(mock.requests, { url = url, method = "GET", binary = binary })
+  local body = mock.routes[url]
+  if body == nil then
+    return nil, "Not Found", makeHandle(404, "")
+  end
+  return makeHandle(200, body)
 end
 
 -- Build an SSE body from a list of JSON-able events

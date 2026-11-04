@@ -1,12 +1,11 @@
-# oc-code v0.2.0
+# cc-code v0.2.0
 
-Interactive AI coding agent for OpenComputers.
+Interactive AI coding agent for ComputerCraft: Tweaked.
 
 ## Installation
 
 ```
-oppm register DonChong2000/oc-ai
-oppm install ai
+wget run https://raw.githubusercontent.com/DonChong2000/cc-ai/main/install.lua
 ```
 
 ## Usage
@@ -14,22 +13,24 @@ oppm install ai
 ### Command Line
 
 ```
-oc-code [options]
+cc-code [options]
   -m, --model <model>   Set AI model (default: anthropic/claude-sonnet-4)
-  -t, --terminal        Force terminal mode (for robots)
+  -t, --terminal        Force terminal mode (line-based, no TUI)
+  -c, --monochrome      Use monochrome colors (automatic on non-advanced computers)
   -h, --help            Show help
 ```
 
 ### Programmatic
 
 ```lua
-local occode = require("oc-code")
+package.path = "/cc-ai/lib/?.lua;/cc-ai/lib/?/init.lua;" .. package.path
+local occode = require("cc-code")
 
 -- Interactive mode
 occode.run()
 
 -- One-shot execution
-local response = occode.exec("List files in /home")
+local response = occode.exec("List the files in /")
 print(response)
 
 -- Chat mode
@@ -46,9 +47,14 @@ print(text)
 | `/model <provider/model>` | Switch to gateway model |
 | `/model google <model>` | Use Google directly |
 | `/model openai <model>` | Use OpenAI directly |
+| `/model groq <model>` | Use Groq directly |
+| `/turtle <prompt>` | Ask a turtle programming question with the quick API reference |
+| `/turtle full <prompt>` | Same, with the full API reference (`docs/turtle.md`) |
 | `/clear` | Clear conversation history |
-| `/exit`, `/quit` | Exit oc-code |
+| `/exit`, `/quit` | Exit cc-code |
 | `!<command>` | Execute shell command directly |
+
+Holding Ctrl+T cancels a request that is in progress. At an empty prompt, it exits cc-code.
 
 ## Tools
 
@@ -60,52 +66,65 @@ The agent has access to these tools:
 | `write_file` | Create or overwrite a file |
 | `edit_file` | Replace exact string in file |
 | `list_directory` | List files and directories |
-| `glob` | Find files by pattern (e.g., `*.lua`) |
-| `grep` | Search file contents |
-| `shell` | Execute OpenOS shell commands |
+| `glob` | Find files by pattern (e.g., `*.lua`, `**/*.lua`) |
+| `grep` | Search file contents (Lua patterns or literal text) |
+| `shell` | Run a CraftOS shell command and capture its output |
+
+When `glob` or `grep` scan from the root directory, they skip `/rom`.
+
+### How shell output is captured
+
+CraftOS has no output redirection, so `shell` and `!<command>` run the command with the terminal redirected to an invisible recording terminal, and return what it printed. While the command runs, it can't be seen. A program that waits for keyboard input blocks cc-code until it exits, so hold Ctrl+T to stop it. `cd` persists, as it would at the shell prompt.
 
 ## Display Modes
 
 ### TUI Mode (Default)
 
-Requires a Tier 2+ screen (4-bit color depth) and GPU. Features:
-- Color-coded output (user, assistant, tools, errors)
+Works on every computer, turtle, pocket computer and monitor. Features:
+- Color-coded output (user, assistant, tools, errors), using the original theme colours on advanced computers
+- Greyscale scheme on non-advanced computers
 - Header bar with hints
 - Status bar showing current operation
-- Scrolling with PageUp/PageDown
-- Command autocomplete popup
-- Mouse wheel scrolling
+- Scrolling with PageUp/PageDown, Ctrl+Up/Down and the mouse wheel
+- Command autocomplete popup (Tab)
+- Command history (Up/Down)
 
 ### Terminal Mode
 
-For robots or computers without GPU/screen. Activated automatically when TUI is unavailable, or forced with `-t` flag. Features:
+Forced with `-t`, and used automatically on screens too small for the TUI. Features:
 - Simple line-by-line output
-- Works on any computer or robot
-- Minimal resource usage
+- CraftOS's own line editor, with history and Tab completion of commands
 
 ## Configuration
 
-### Environment Variables
+### API keys
 
-| Variable | Description |
+API keys are stored as settings with the `set` program. They're saved in `/.settings`, so they persist across reboots.
+
+| Setting | Description |
 |----------|-------------|
 | `AI_GATEWAY_API_KEY` | For gateway models (`provider/model` format) |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | For Google direct (`/model google <model>`) |
 | `OPENAI_API_KEY` | For OpenAI direct (`/model openai <model>`) |
+| `GROQ_API_KEY` | For Groq direct (`/model groq <model>`) |
+| `ai.http_timeout` | HTTP timeout in seconds (default 120) |
 
-### Project instructions (.oc-code.md / CLAUDE.md)
+### Project instructions (.cc-code.md / CLAUDE.md)
 
-oc-code reads project-specific instructions from the current directory into the system prompt. It prefers `.oc-code.md` (written for the in-game agent, up to 4000 chars); if absent it falls back to `CLAUDE.md` (up to 2000 chars). Long files are truncated with a `[truncated]` marker.
+cc-code adds project-specific instructions from the current directory to the system prompt. It prefers `.cc-code.md`, which is written for the in-game agent and can be up to 4000 chars. If that file is absent, it falls back to `CLAUDE.md`, up to 2000 chars. Long files are truncated with a `[truncated]` marker.
 
 ### Skills
 
 Skills are extensible command handlers. Built-in skills:
 - `help` - `/help` command
 - `model` - `/model` command
+- `turtle` - `/turtle` command. On a turtle it also adds turtle guidance (fuel, dead reckoning, safe movement) to every request
 
 Custom skills can be placed in:
-- `/usr/lib/oc-code/skills/` - System-wide
-- `.oc-code/skills/` - Project-local
+- `/cc-ai/lib/cc-code/skills/` - System-wide (next to the built-in ones)
+- `.cc-code/skills/` - Project-local (relative to the current directory)
+
+A skill file returns `require("cc-code.skills").create({ name = ..., commands = { "/x" }, onActivate = function(agent, args) ... end })`.
 
 ## Available Models
 
@@ -124,16 +143,22 @@ google/gemini-2.5-pro
 
 Google:
 ```
+/model google gemini-flash-latest
 /model google gemini-2.5-flash
 /model google gemini-2.5-pro
-/model google gemini-2.0-flash
 ```
 
 OpenAI:
 ```
 /model openai gpt-4o
 /model openai gpt-4o-mini
-/model openai gpt-4-turbo
+/model openai gpt-5-mini
+```
+
+Groq:
+```
+/model groq llama-3.3-70b-versatile
+/model groq openai/gpt-oss-120b
 ```
 
 ## API Reference
@@ -198,12 +223,10 @@ Added the power function to calculator.lua.
 ### Shell Commands
 
 ```
-> !ls -la
-drwxr-xr-x  home
-drwxr-xr-x  lib
--rw-r--r--  init.lua
+> !ls
+cc-ai     rom       startup
+calculator.lua
 
-> !df
-filesystem    used   total
-/dev/hdd1     45%    2048k
+> !id
+This is computer #0
 ```

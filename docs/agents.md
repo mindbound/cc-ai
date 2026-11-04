@@ -1,5 +1,5 @@
 # ai.agents - Base Management Agents
 
-Autonomous agents for managing your Minecraft base.
+Autonomous agents for managing your Minecraft base (ComputerCraft: Tweaked).
 
 *Coming soon.*
