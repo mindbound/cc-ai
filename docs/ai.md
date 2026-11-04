@@ -69,7 +69,7 @@ set AI_CUSTOM_API_KEY <key>
 
 The base URL may also be given with `/chat/completions` on the end, as some providers document it.
 
-The custom provider requests streamed replies even for `generateText`. Some servers, NanoGPT among them, send non-streamed replies with a `Content-Length` that counts characters instead of bytes, so CC: Tweaked cuts off the end of any reply that contains non-ASCII text such as em dashes. Streamed replies can't be cut that way. Pass `stream = false` to `createCustom` to turn this off for a server that doesn't support streaming.
+The custom provider requests streamed replies even for `generateText`. Data then keeps arriving while a slow (thinking) model works, so the 60-second idle timeout isn't hit. Pass `stream = false` to `createCustom` to turn this off for a server that doesn't support streaming.
 
 ```lua
 local ai = require("ai")

@@ -38,7 +38,7 @@ print("Installing cc-ai from " .. REPO .. " (" .. BRANCH .. ") to " .. DIR)
 
 -- List the repository's files
 local treeUrl = "https://api.github.com/repos/" .. REPO .. "/git/trees/" .. BRANCH .. "?recursive=1"
-local tree = json(get(treeUrl))
+local tree = json(get(treeUrl, true))
 if type(tree) ~= "table" or type(tree.tree) ~= "table" then
   error("Unexpected response listing " .. REPO, 0)
 end

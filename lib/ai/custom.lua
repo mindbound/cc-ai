@@ -11,8 +11,9 @@ local createCustom = compat.createProvider({
   envVar = "AI_CUSTOM_API_KEY",
   baseURLEnvVar = "AI_CUSTOM_BASE_URL",
   apiKeyOptional = true,
-  -- Streamed replies avoid servers that send a wrong Content-Length for
-  -- non-ASCII text (NanoGPT). Disable with createCustom({ stream = false }).
+  -- generateText uses streamed replies: data keeps arriving while a slow
+  -- (thinking) model works, so the 60s idle timeout isn't hit. Disable with
+  -- createCustom({ stream = false }) for servers without streaming.
   streamResponses = true,
   apiKeyError = "Run: set AI_CUSTOM_API_KEY <key>, or pass apiKey to createCustom().",
   baseURLError = "No endpoint configured. Run: set AI_CUSTOM_BASE_URL <url> " ..

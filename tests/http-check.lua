@@ -1,11 +1,13 @@
 -- tests/http-check.lua [model]
--- Checks whether an OpenAI-compatible endpoint's replies arrive complete and
--- decode in CC: Tweaked, with and without streaming. Uses AI_CUSTOM_BASE_URL
--- and AI_CUSTOM_API_KEY. The prompt asks for non-ASCII text on purpose.
+-- Checks whether an OpenAI-compatible endpoint's replies decode in
+-- CC: Tweaked, in text and binary mode, with and without streaming. Uses
+-- AI_CUSTOM_BASE_URL and AI_CUSTOM_API_KEY. The prompt asks for non-ASCII
+-- text on purpose: in CC: Tweaked 1.120, a text-mode reply containing
+-- multi-byte UTF-8 reported its length (#) in characters, not bytes.
 --   /cc-ai/tests/http-check deepseek/deepseek-v4.1-flash:thinking
--- Prints a summary (with the decode error and the bytes around it when a
--- reply doesn't decode) and saves it to /http-check.txt; the raw replies go
--- to /http-check-plain.json and /http-check-stream.txt. Never prints the key.
+-- Prints a summary (decode errors with the bytes around them) and saves it
+-- to /http-check.txt; raw replies go to /http-check-<mode>.txt. Never
+-- prints the key.
 
 local model = ... or "deepseek/deepseek-v4.1-flash:thinking"
 local root = "/" .. fs.getDir(fs.getDir(shell.getRunningProgram()))
@@ -36,6 +38,17 @@ local function save(path, data)
   f.close()
 end
 
+-- Byte count without the length operator (gsub walks the real content)
+local function counted(str)
+  return select(2, str:gsub(".", ""))
+end
+
+-- "#s" next to the counted bytes, flagged when they differ
+local function lengths(str)
+  local a, b = #str, counted(str)
+  return ("# %d, counted %d%s"):format(a, b, a == b and "" or " MISMATCH")
+end
+
 -- Hex and printable view of the bytes around a position
 local function around(str, pos)
   local from, to = math.max(1, pos - 8), math.min(#str, pos + 8)
@@ -53,72 +66,65 @@ local function check(str, label)
   local ok, err = pcall(json.decode, str)
   if ok then return true end
   err = tostring(err):gsub("^.-:%d+: ", "")
-  out("  " .. label .. " decode error: " .. err)
+  out("    " .. label .. ": " .. err)
   local col = tonumber(err:match("col (%d+)"))
-  local line = tonumber(err:match("line (%d+)"))
-  if col and line == 1 then
-    out("  " .. around(str, col))
+  if col and tonumber(err:match("line (%d+)")) == 1 then
+    out("    " .. around(str, col))
   end
   return false
 end
 
 -- Asks for non-ASCII characters on purpose: em dashes and a degree sign
-local prompt = "Reply with exactly this text and nothing else: " ..
-  "caf\195\169 \226\128\148 17 \194\176C \226\128\148 done"
+local sample = "caf\195\169 \226\128\148 17 \194\176C \226\128\148 done"
+local prompt = "Reply with exactly this text and nothing else: " .. sample
 
-local function run(stream)
+local function run(stream, binary)
+  local label = (stream and "stream" or "plain") .. "/" .. (binary and "binary" or "text")
   local response, err, errResponse = http.post({
     url = url,
     headers = headers,
     body = json.encode({ model = model, stream = stream or nil, max_tokens = 1000,
       messages = { { role = "user", content = prompt } } }),
     timeout = 0,
+    binary = binary,
   })
   local h = response or errResponse
   if not h then
-    out("  request failed: " .. tostring(err))
+    out(label .. ": request failed: " .. tostring(err))
     return
   end
   local code = h.getResponseCode()
-  local framing = "unknown"
-  for name, value in pairs(h.getResponseHeaders()) do
-    if name:lower() == "content-length" then framing = "Content-Length " .. value end
-    if name:lower() == "transfer-encoding" then framing = "Transfer-Encoding " .. value end
-  end
   local body = h.readAll() or ""
   h.close()
-  save(stream and "/http-check-stream.txt" or "/http-check-plain.json", body)
-  local nonAscii = select(2, body:gsub("[\128-\255]", ""))
-  out(("  status %d, %s, %d bytes, %d non-ASCII"):format(code, framing, #body, nonAscii))
-  local complete
+  save("/http-check-" .. label:gsub("/", "-") .. ".txt", body)
+  out(("%s: status %d, %s"):format(label, code, lengths(body)))
+  local ok
   if stream then
-    -- Each "data:" line must decode, and the stream must finish
-    complete = body:find("data: [DONE]", 1, true) ~= nil
     local n, bad = 0, 0
     for line in body:gmatch("data: ([^\r\n]+)") do
       if line ~= "[DONE]" then
         n = n + 1
-        local hasNonAscii = line:find("[\128-\255]") ~= nil
-        if not check(line, "line " .. n .. (hasNonAscii and " (non-ASCII)" or "")) then
+        if not check(line, "line " .. n .. " (" .. lengths(line) .. ")") then
           bad = bad + 1
-          complete = false
         end
       end
     end
+    ok = bad == 0 and body:find("data: [DONE]", 1, true) ~= nil
     out(("  %d data lines, %d failed to decode"):format(n, bad))
   else
-    complete = check(body, "body")
+    ok = check(body, "body")
   end
-  out("  complete: " .. tostring(complete))
+  out("  decodes: " .. tostring(ok))
 end
 
 out("Endpoint: " .. url)
 out("Model: " .. model)
 out("Host: " .. tostring(_HOST))
-out("Without streaming:")
-run(false)
-out("With streaming:")
-run(true)
+out("String literal: " .. lengths(sample))
+run(false, false)
+run(false, true)
+run(true, false)
+run(true, true)
 
 save("/http-check.txt", table.concat(lines, "\n") .. "\n")
-print("Saved to /http-check.txt, raw replies to /http-check-plain.json and /http-check-stream.txt")
+print("Saved to /http-check.txt")

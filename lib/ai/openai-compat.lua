@@ -88,10 +88,10 @@ local function createLanguageModel(modelId, config)
   }
 
   function model.doGenerate(opts)
-    -- Some servers (seen with NanoGPT) send non-streamed replies with a
-    -- Content-Length that counts characters, not bytes, so CC: Tweaked cuts
-    -- off the end of any reply containing non-ASCII text. Streamed replies
-    -- are chunked and can't be cut that way; CC: Tweaked buffers them anyway.
+    -- Optionally go through the streaming endpoint: data keeps arriving
+    -- while the model works, so a slow (thinking) model doesn't hit the
+    -- HTTP idle timeout. CC: Tweaked buffers the stream, so the result is
+    -- the same as a plain request.
     if config.streamResponses then
       local parsed = model.doStream(opts, nil, true)
       return parsed, { streamed = true, model = modelId }

@@ -113,7 +113,7 @@ function mock.post(req, body, headers)
   end
   local decoded
   pcall(function() decoded = json.decode(req.body) end)
-  table.insert(mock.requests, { url = req.url, headers = req.headers, body = req.body, json = decoded, timeout = req.timeout })
+  table.insert(mock.requests, { url = req.url, headers = req.headers, body = req.body, json = decoded, timeout = req.timeout, binary = req.binary })
   local resp = table.remove(mock.queue, 1)
   if not resp then
     error("mock http: unexpected request to " .. tostring(req.url))
