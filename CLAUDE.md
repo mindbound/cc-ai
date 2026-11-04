@@ -35,7 +35,7 @@ Offline suite with a fake `http` (no keys or network needed), run in the CraftOS
 ```
 The runner mounts the repo read-only at `/cc-ai` in a headless emulator, runs `tests/run.lua`, and prints the results file. Headless stdout is a garbled screen dump, so tests write results to a file. Suites are `tests/test_*.lua`, each a `function(T)` using `T.test/T.eq/T.contains/T.raises` and `T.http` (mock: `push` responses for POST, `routes` for GET). In-game: `/cc-ai/tests/run [suite]`.
 
-Live checks against a real API: `.\tests\live.ps1 -Provider custom -Model <model>` (`tests/live.lua`). They use the emulator data dir `%LOCALAPPDATA%\cc-ai-live`, where the user sets keys themselves. Never read or print its `.settings` file.
+Live checks against a real API: `.\tests\live.ps1 -Provider custom -Model <model>` (`tests/live.lua`). They use the emulator data dir `C:\cc-ai-live`, where the user sets keys themselves. Never read or print its `.settings` file.
 
 ## Architecture
 

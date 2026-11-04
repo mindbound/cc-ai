@@ -1,12 +1,15 @@
 # Run the live API checks (tests/live.lua) in headless CraftOS-PC.
 # The emulator data directory holds the API keys, which you set yourself:
-#   & "C:\Program Files\CraftOS-PC\CraftOS-PC.exe" -d "$env:LOCALAPPDATA\cc-ai-live"
+#   & "C:\Program Files\CraftOS-PC\CraftOS-PC_console.exe" -d "C:\cc-ai-live"
 #   (then in the emulator)  set AI_CUSTOM_API_KEY <key>
+#   (and for the custom provider)  set AI_CUSTOM_BASE_URL <url>
 # Usage: .\tests\live.ps1 -Provider custom -Model deepseek/deepseek-v4.1-flash:thinking
+# CraftOS-PC also has its own HTTP limit (http_timeout in <DataDir>\config\global.json,
+# 30000 ms by default); raise it for slow models.
 param(
   [Parameter(Mandatory = $true)][string]$Provider,
   [Parameter(Mandatory = $true)][string]$Model,
-  [string]$DataDir = (Join-Path $env:LOCALAPPDATA "cc-ai-live"),
+  [string]$DataDir = "C:\cc-ai-live",
   [string]$Emulator = "CraftOS-PC_console.exe"
 )
 
