@@ -107,7 +107,7 @@ API keys are stored as settings with the `set` program. They're saved in `/.sett
 | `GOOGLE_GENERATIVE_AI_API_KEY` | For Google direct (`/model google <model>`) |
 | `OPENAI_API_KEY` | For OpenAI direct (`/model openai <model>`) |
 | `GROQ_API_KEY` | For Groq direct (`/model groq <model>`) |
-| `ai.http_timeout` | HTTP timeout in seconds (default 120) |
+| `ai.http_timeout` | HTTP idle timeout for SDK scripts, 0-60 (default 60). cc-code itself uses none |
 
 ### Project instructions (.cc-code.md / CLAUDE.md)
 

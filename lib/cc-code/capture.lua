@@ -129,7 +129,9 @@ function capture.createTerminal(width, height, parent)
   return t
 end
 
--- Run a shell command, returning success (boolean) and its captured output.
+-- Run a shell command, returning success (boolean), its captured output and
+-- whether the user held Ctrl+T while it ran (the shell catches the
+-- "Terminated" error inside the program, so it is detected separately).
 -- The command runs in the current shell, so `cd` persists, like typing it.
 function capture.run(command, workdir)
   if not shell then
@@ -150,7 +152,19 @@ function capture.run(command, workdir)
   local recorder = capture.createTerminal(width, VIRTUAL_HEIGHT, parent)
 
   local previous = term.redirect(recorder)
-  local ok, result = pcall(shell.run, command)
+  local ok, result
+  local terminated = false
+  -- The watcher must come first: parallel stops as soon as a coroutine
+  -- dies, before later coroutines see the event that killed it
+  parallel.waitForAny(function()
+    -- Never returns: just notes Ctrl+T (the program still receives it)
+    while true do
+      os.pullEventRaw("terminate")
+      terminated = true
+    end
+  end, function()
+    ok, result = pcall(shell.run, command)
+  end)
   term.redirect(previous)
 
   if oldDir then
@@ -159,11 +173,11 @@ function capture.run(command, workdir)
 
   local output = recorder.getText()
   if not ok then
-    -- shell.run itself failed (e.g. "Terminated" raised outside the program)
+    -- shell.run itself failed
     output = output .. (output ~= "" and "\n" or "") .. tostring(result)
-    return false, output
+    return false, output, terminated
   end
-  return result == true, output
+  return result == true, output, terminated
 end
 
 return capture

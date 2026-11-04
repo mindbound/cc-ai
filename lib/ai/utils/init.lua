@@ -1,12 +1,24 @@
 local utils = {}
 
--- Seconds to wait for an HTTP response. Model calls with tools can take a
--- while; override with: set ai.http_timeout <seconds>
-local DEFAULT_TIMEOUT = 120
+-- HTTP idle timeout in seconds: the request fails if the server sends
+-- nothing for this long. CC: Tweaked accepts 0-60 (and raises an error for
+-- anything else); 0 means no timeout. Override per call with opts.timeout
+-- or globally with: set ai.http_timeout <seconds>
+local DEFAULT_TIMEOUT = 60
+local MAX_TIMEOUT = 60
 
-local function getTimeout()
-  local value = settings and settings.get("ai.http_timeout")
-  return tonumber(value) or DEFAULT_TIMEOUT
+local function clampTimeout(value)
+  value = tonumber(value)
+  if not value then return nil end
+  return math.max(0, math.min(MAX_TIMEOUT, value))
+end
+
+local function getTimeout(override)
+  local value = clampTimeout(override)
+  if value then return value end
+  value = clampTimeout(settings and settings.get("ai.http_timeout"))
+  if value then return value end
+  return DEFAULT_TIMEOUT
 end
 
 -- Read a configuration value (API keys etc.).
@@ -38,15 +50,15 @@ end
 -- POST and return the response handle plus the status code.
 -- Non-2xx responses still return their handle (the body usually holds the
 -- API's JSON error); only transport failures raise.
-local function post(url, headers, body)
+local function post(url, headers, body, timeout)
   if not http then
-    error("HTTP API is disabled. Enable http in the ComputerCraft config.")
+    error("HTTP API is disabled. Enable http in the ComputerCraft config.", 0)
   end
   local response, err, errResponse = http.post({
     url = url,
     body = body,
     headers = headers,
-    timeout = getTimeout(),
+    timeout = getTimeout(timeout),
   })
   if response then
     return response, response.getResponseCode()
@@ -77,8 +89,9 @@ local function describeError(code, reason, bodyText)
 end
 
 -- POST and return the full response body as a string
-function utils.httpPost(url, headers, body)
-  local handle, code, reason = post(url, headers, body)
+-- timeout: optional idle timeout in seconds (0 = none), see DEFAULT_TIMEOUT
+function utils.httpPost(url, headers, body, timeout)
+  local handle, code, reason = post(url, headers, body, timeout)
   local text = handle.readAll() or ""
   handle.close()
   if code >= 400 then
@@ -91,8 +104,8 @@ end
 -- (each line keeps its trailing "\n").
 -- Note: CC: Tweaked downloads the whole response before http.post returns,
 -- so chunks are delivered all at once when the response completes.
-function utils.httpPostStream(url, headers, body)
-  local handle, code, reason = post(url, headers, body)
+function utils.httpPostStream(url, headers, body, timeout)
+  local handle, code, reason = post(url, headers, body, timeout)
   if code >= 400 then
     local text = handle.readAll() or ""
     handle.close()

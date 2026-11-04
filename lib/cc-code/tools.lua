@@ -34,7 +34,10 @@ end
 local function readWithLineNumbers(content, offset, limit)
   local lines = {}
   local i = 0
-  for line in content:gmatch("([^\n]*)\n?") do
+  -- Make every line, including the last, end with "\n": this avoids
+  -- gmatch's extra empty match at the end of the string
+  local source = content:sub(-1) == "\n" and content or (content .. "\n")
+  for line in source:gmatch("([^\n]*)\n") do
     i = i + 1
     if i >= offset then
       table.insert(lines, string.format("%4d\t%s", i, line))
@@ -48,8 +51,12 @@ end
 
 -- Helper: count lines in content
 local function countLines(content)
-  local count = 1
+  if content == "" then return 0 end
+  local count = 0
   for _ in content:gmatch("\n") do
+    count = count + 1
+  end
+  if content:sub(-1) ~= "\n" then
     count = count + 1
   end
   return count
@@ -104,6 +111,9 @@ tools.write_file = ai.tool({
     required = { "path", "content" },
   },
   execute = function(args)
+    if type(args.content) ~= "string" then
+      return { error = "content must be a string" }
+    end
     local path = resolvePath(args.path)
     if fs.isReadOnly(path) then
       return { error = "Path is read-only: " .. path }
@@ -143,19 +153,25 @@ tools.edit_file = ai.tool({
     if fs.isDir(path) then
       return { error = "Path is a directory: " .. path }
     end
+    if type(args.old_string) ~= "string" or type(args.new_string) ~= "string" then
+      return { error = "old_string and new_string must be strings" }
+    end
+    if args.old_string == "" then
+      return { error = "old_string must not be empty" }
+    end
     local content = readFile(path)
     if not content then
       return { error = "Cannot open file: " .. path }
     end
 
-    -- Count occurrences
+    -- Count (non-overlapping) occurrences, as gsub will replace them
     local count = 0
     local pos = 1
     while true do
       local found = content:find(args.old_string, pos, true)
       if not found then break end
       count = count + 1
-      pos = found + 1
+      pos = found + #args.old_string
     end
 
     if count == 0 then
@@ -290,7 +306,11 @@ tools.shell = ai.tool({
   },
   execute = function(args)
     local workdir = args.workdir and resolvePath(args.workdir) or nil
-    local success, output = capture.run(args.command, workdir)
+    local success, output, terminated = capture.run(args.command, workdir)
+    if terminated then
+      -- Ctrl+T stops the agent too, not just the program it ran
+      error("Terminated", 0)
+    end
     if output == "" then
       output = success and "(no output)" or "(command failed, no output)"
     end

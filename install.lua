@@ -50,30 +50,53 @@ if #files == 0 then
   error("No files found in " .. REPO .. " (" .. BRANCH .. ")", 0)
 end
 
--- Remove the previous install's managed directories (stale files)
+-- Download everything into a staging directory first, so a failed download
+-- (rate limit, network, full disk) leaves the previous install working
+local STAGING = DIR .. ".download"
+if fs.exists(STAGING) then
+  fs.delete(STAGING)
+end
+
+local rawBase = "https://raw.githubusercontent.com/" .. REPO .. "/" .. BRANCH .. "/"
+local ok, err = pcall(function()
+  local _, y = term.getCursorPos()
+  for i, path in ipairs(files) do
+    term.setCursorPos(1, y)
+    term.clearLine()
+    write(("[%d/%d] %s"):format(i, #files, path))
+    local content = get(rawBase .. path, true)
+    local target = fs.combine(STAGING, path)
+    fs.makeDir(fs.getDir(target))
+    local handle, openErr = fs.open(target, "wb")
+    if not handle then
+      error("Cannot write " .. target .. ": " .. tostring(openErr), 0)
+    end
+    handle.write(content)
+    handle.close()
+    _, y = term.getCursorPos()
+  end
+end)
+print()
+if not ok then
+  if fs.exists(STAGING) then
+    fs.delete(STAGING)
+  end
+  error(err, 0)
+end
+
+-- Replace the previous install's managed directories (removes stale files)
+fs.makeDir(DIR)
 for name in pairs(INSTALL) do
   local path = fs.combine(DIR, name)
   if fs.exists(path) then
     fs.delete(path)
   end
+  local staged = fs.combine(STAGING, name)
+  if fs.exists(staged) then
+    fs.move(staged, path)
+  end
 end
-
--- Download everything
-local rawBase = "https://raw.githubusercontent.com/" .. REPO .. "/" .. BRANCH .. "/"
-local _, y = term.getCursorPos()
-for i, path in ipairs(files) do
-  term.setCursorPos(1, y)
-  term.clearLine()
-  write(("[%d/%d] %s"):format(i, #files, path))
-  local content = get(rawBase .. path, true)
-  local target = fs.combine(DIR, path)
-  fs.makeDir(fs.getDir(target))
-  local handle = fs.open(target, "wb")
-  handle.write(content)
-  handle.close()
-  _, y = term.getCursorPos()
-end
-print()
+fs.delete(STAGING)
 
 -- Startup file: cc-code on the shell path, with completion for its options
 local binDir = fs.combine(DIR, "bin")

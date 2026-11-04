@@ -167,7 +167,9 @@ shell.setPath(shell.path() .. ":/cc-ai/bin")
 | `OPENAI_API_KEY` | OpenAI | `openai("model")` or `/model openai <model>` |
 | `GROQ_API_KEY` | Groq | `groq("model")` or `/model groq <model>` |
 
-Set them with `set <NAME> <key>`. `set ai.http_timeout <seconds>` changes the HTTP timeout (default 120).
+Set them with `set <NAME> <key>`.
+
+HTTP requests made with the SDK fail if the server sends nothing for 60 seconds, the longest timeout CC: Tweaked allows. Change it with `set ai.http_timeout <0-60>` (`0` = no timeout), or per call with the `timeout` option. cc-code itself uses no timeout, because long answers can take more than a minute; hold Ctrl+T to cancel.
 
 ## Requirements
 

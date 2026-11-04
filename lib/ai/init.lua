@@ -48,6 +48,9 @@ local function executeTool(tool, args)
     local ok, result = pcall(fn.execute, args)
     if ok then
       return result
+    elseif result == "Terminated" then
+      -- Ctrl+T: cancel the whole call instead of reporting a tool error
+      error(result, 0)
     else
       return { error = tostring(result) }
     end
@@ -294,6 +297,7 @@ function ai.generateObject(opts)
     maxOutputTokens = opts.maxOutputTokens,
     temperature = opts.temperature,
     topP = opts.topP,
+    timeout = opts.timeout,
     output = ai.Output.object({ schema = opts.schema }),
   })
 

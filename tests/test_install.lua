@@ -69,6 +69,14 @@ return function(T)
     T.eq(count, 1)
   end)
 
+  T.test("a failed download leaves the previous install in place", function()
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 3 }", ["lib/ai/missing.lua"] = "x" })
+    mock.routes["https://raw.githubusercontent.com/me/repo/dev/lib/ai/missing.lua"] = nil
+    T.raises(function() install(dir) end, "Download failed")
+    T.eq(T.readFile(dir .. "/lib/ai/init.lua"), "return { v = 2 }")
+    T.ok(not fs.exists(dir .. ".download"), "staging directory cleaned up")
+  end)
+
   T.test("installer fails clearly when the repository can't be listed", function()
     mock.reset()
     T.raises(function() install(dir) end, "Download failed")

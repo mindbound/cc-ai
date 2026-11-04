@@ -71,6 +71,7 @@ local result = ai.generateText({
   system = "You are a chef.",         -- optional system prompt
   maxOutputTokens = 100,              -- optional
   temperature = 0.7,                  -- optional
+  timeout = 60,                       -- optional: HTTP idle timeout in seconds, 0-60, 0 = none
 })
 
 print(result.text)
@@ -163,6 +164,6 @@ Run examples from the CraftOS shell:
 - `GOOGLE_GENERATIVE_AI_API_KEY` - For Google provider
 - `OPENAI_API_KEY` - For OpenAI provider
 - `GROQ_API_KEY` - For Groq provider
-- `ai.http_timeout` - HTTP timeout in seconds (default 120)
+- `ai.http_timeout` - HTTP idle timeout in seconds, 0-60 (default 60, 0 = none)
 
-If requests fail with "Timed out", the server's own HTTP limits may also need raising: see the `http` section of `computercraft-server.toml`.
+The timeout counts seconds without any data from the server, and CC: Tweaked rejects values above 60. A non-streaming reply sends nothing until it is complete, so very long answers can hit it: pass `timeout = 0`, or use `streamText`, which keeps data flowing.

@@ -22,7 +22,26 @@ agent.config = {
   maxOutputTokens = 4096,
   temperature = 0.7,
   systemPrompt = nil,
+  -- HTTP idle timeout in seconds. 0 = none: a non-streaming reply sends
+  -- nothing until it is complete, and CC: Tweaked caps timeouts at 60s,
+  -- which long answers can exceed. Hold Ctrl+T to cancel instead.
+  timeout = 0,
 }
+
+-- Convert every string in a tool result to UTF-8 (file contents, shell
+-- output and names on the computer are CC charset; JSON must be UTF-8)
+local function toUtf8Deep(value)
+  if type(value) == "string" then
+    return text.fromCC(value)
+  elseif type(value) == "table" then
+    local out = {}
+    for k, v in pairs(value) do
+      out[k] = toUtf8Deep(v)
+    end
+    return out
+  end
+  return value
+end
 
 -- Agent state
 agent.state = {
@@ -85,6 +104,7 @@ You have: read_file, write_file, edit_file, list_directory, glob, grep, shell.
 ## Writing Lua for this system
 - Match repo style: 2-space indent, double quotes, `local` everything, modules return a table
 - Wrap risky calls in pcall (JSON decode, peripheral calls, network); use error("message") for failures
+- Use plain ASCII in strings and comments: the CC screen shows UTF-8 characters such as dashes, arrows or emoji as garbage
 - Check a peripheral exists (peripheral.find / peripheral.isPresent) before using it
 - Keep memory small: stream or process line-by-line, avoid building large strings/tables
 
@@ -219,9 +239,12 @@ function agent.process(input, callbacks)
     end
 
     -- Execute shell command, capturing what it prints
-    local success, output = capture.run(command)
+    local success, output, terminated = capture.run(command)
     agent.state.workingDirectory = cmnPath.cwd() -- `cd` may have changed it
 
+    if terminated then
+      output = output .. (output ~= "" and "\n" or "") .. "(stopped with Ctrl+T)"
+    end
     if output == "" then
       output = success and "(command executed, no output)" or "(command failed, no output)"
     end
@@ -298,15 +321,16 @@ function agent.process(input, callbacks)
     maxSteps = agent.config.maxSteps,
     maxOutputTokens = agent.config.maxOutputTokens,
     temperature = agent.config.temperature,
+    timeout = agent.config.timeout,
   }
 
   -- Use non-streaming mode
   local result
   local success, err
 
-  -- Wrap tool execution to provide callbacks
+  -- Wrap tool execution to provide callbacks and convert results to UTF-8
   -- Create copies to avoid mutating original tools (prevents wrapper accumulation)
-  if onToolCall or onToolResult then
+  do
     local wrappedTools = {}
     for _, tool in ipairs(opts.tools) do
       -- Create a shallow copy of the tool table
@@ -327,7 +351,7 @@ function agent.process(input, callbacks)
         if onToolCall then
           onToolCall(tool["function"].name, args)
         end
-        local result = origExecute(args)
+        local result = toUtf8Deep(origExecute(args))
         if onToolResult then
           onToolResult(tool["function"].name, result)
         end

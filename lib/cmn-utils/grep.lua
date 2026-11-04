@@ -66,7 +66,13 @@ function grep.search(pattern, opts)
     for line in nextLine do
       lineNum = lineNum + 1
       if lineNum % 200 == 0 then path.maybeYield() end
-      if line:find(pattern) then
+      -- Some malformed patterns ("a[") only fail once a line reaches them
+      local okFind, found = pcall(string.find, line, pattern)
+      if not okFind then
+        close()
+        error("Invalid Lua pattern: " .. (tostring(found):gsub("^.-:%d+: ", "")), 0)
+      end
+      if found then
         table.insert(results, {
           file = relPath,
           line = lineNum,
@@ -110,7 +116,11 @@ function grep.search(pattern, opts)
   if not fs.exists(basePath) then
     return { error = "Path not found: " .. basePath }
   end
-  walk(basePath, fs.isDir(basePath) and "" or fs.getName(basePath))
+  local okWalk, walkErr = pcall(walk, basePath, fs.isDir(basePath) and "" or fs.getName(basePath))
+  if not okWalk then
+    if walkErr == "Terminated" then error(walkErr, 0) end
+    return { error = tostring(walkErr) }
+  end
   return {
     pattern = opts.literal and ("literal: " .. pattern) or pattern,
     results = results,

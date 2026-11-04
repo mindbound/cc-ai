@@ -107,6 +107,10 @@ function mock.post(req, body, headers)
   if type(req) ~= "table" then
     req = { url = req, body = body, headers = headers }
   end
+  -- Real CC: Tweaked raises for timeouts outside 0-60 seconds
+  if req.timeout ~= nil and (type(req.timeout) ~= "number" or req.timeout < 0 or req.timeout > 60) then
+    error("timeout out of range (" .. tostring(req.timeout) .. ")", 2)
+  end
   local decoded
   pcall(function() decoded = json.decode(req.body) end)
   table.insert(mock.requests, { url = req.url, headers = req.headers, body = req.body, json = decoded, timeout = req.timeout })
