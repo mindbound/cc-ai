@@ -59,7 +59,7 @@ cc-code
 - **Interactive TUI** - Color-coded interface with scrolling and command autocomplete
 - **Fits any screen** - Computers, turtles (39x13), pocket computers (26x20) and monitors
 - **Greyscale mode** - Used automatically on non-advanced computers
-- **Multi-provider support** - Anthropic, OpenAI, Google, Groq (direct or via gateway)
+- **Multi-provider support** - Anthropic, OpenAI, Google, Groq (direct or via gateway), or any OpenAI-compatible endpoint
 - **Built-in tools** - read_file, write_file, edit_file, list_directory, glob, grep, shell
 - **Skills system** - Extensible command handlers, including turtle programming help
 
@@ -166,6 +166,8 @@ shell.setPath(shell.path() .. ":/cc-ai/bin")
 | `GOOGLE_GENERATIVE_AI_API_KEY` | Google | `google("model")` or `/model google <model>` |
 | `OPENAI_API_KEY` | OpenAI | `openai("model")` or `/model openai <model>` |
 | `GROQ_API_KEY` | Groq | `groq("model")` or `/model groq <model>` |
+| `AI_CUSTOM_BASE_URL` | Custom (OpenAI-compatible) | `custom("model")` or `/model custom <model>`, e.g. `https://nano-gpt.com/api/v1` |
+| `AI_CUSTOM_API_KEY` | Custom (OpenAI-compatible) | Optional: keyless local servers work without it |
 
 Set them with `set <NAME> <key>`.
 
@@ -193,6 +195,8 @@ The offline test suite uses a fake HTTP API, so it needs no keys or network. Run
 ```
 
 You can also run it in-game with `/cc-ai/tests/run`.
+
+`tests/live.ps1 -Provider <gateway|google|openai|groq|custom> -Model <model>` runs live checks against a real API (text, streaming, tools, structured output and a full agent task). Keys are read from the emulator data directory's settings, which you set yourself in the emulator: see the top of `tests/live.ps1`.
 
 ## License
 

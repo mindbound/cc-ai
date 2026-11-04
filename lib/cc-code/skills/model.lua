@@ -43,7 +43,16 @@ local providers = {
       "llama-3.3-70b-versatile",
     },
   },
+  -- Any OpenAI-compatible endpoint, set with: set AI_CUSTOM_BASE_URL <url>
+  custom = {
+    name = "Custom endpoint",
+    env = "AI_CUSTOM_API_KEY",
+    models = {},
+  },
 }
+
+-- Direct providers, in the order they are listed and completed
+local directProviders = { "google", "openai", "groq", "custom" }
 
 -- Format model display
 local function formatModel(model)
@@ -98,7 +107,7 @@ local function getCompletions(args)
 
   -- Direct providers first, so the first (highlighted) entry is not a
   -- gateway model that needs a different API key
-  for _, name in ipairs({ "google", "openai", "groq" }) do
+  for _, name in ipairs(directProviders) do
     if searchTerm == "" or name:find(searchTerm, 1, true) == 1 then
       table.insert(results, { cmd = "/model " .. name, desc = providers[name].name })
     end
@@ -164,6 +173,10 @@ return skills.create({
       for _, model in ipairs(providers.groq.models) do
         table.insert(lines, "    " .. model)
       end
+      table.insert(lines, "  /model custom <model>  - Use an OpenAI-compatible endpoint")
+      local customURL = settings and settings.get("AI_CUSTOM_BASE_URL")
+      table.insert(lines, "    endpoint: " .. (customURL and tostring(customURL) or
+        "not set (set AI_CUSTOM_BASE_URL <url>)"))
       return nil, table.concat(lines, "\n")
     end
 
@@ -171,7 +184,11 @@ return skills.create({
     local providerName = parts[1]:lower()
     local modelId = parts[2]
 
-    if modelId and (providerName == "google" or providerName == "openai" or providerName == "groq") then
+    local isDirect = false
+    for _, name in ipairs(directProviders) do
+      if providerName == name then isDirect = true end
+    end
+    if modelId and isDirect then
       local model, err = createDirectModel(providerName, modelId)
       if not model then
         return nil, "Error: " .. err

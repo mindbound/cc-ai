@@ -26,6 +26,7 @@ return skills.create({
       "    /model google <model>     - Use Google directly",
       "    /model openai <model>     - Use OpenAI directly",
       "    /model groq <model>       - Use Groq directly",
+      "    /model custom <model>     - Use AI_CUSTOM_BASE_URL",
       "  /turtle <prompt> - Ask turtle programming question with context",
       "    /turtle write a mining script    - Quick reference",
       "    /turtle full <prompt>            - Use full API docs",

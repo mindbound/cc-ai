@@ -35,6 +35,8 @@ Offline suite with a fake `http` (no keys or network needed), run in the CraftOS
 ```
 The runner mounts the repo read-only at `/cc-ai` in a headless emulator, runs `tests/run.lua`, and prints the results file. Headless stdout is a garbled screen dump, so tests write results to a file. Suites are `tests/test_*.lua`, each a `function(T)` using `T.test/T.eq/T.contains/T.raises` and `T.http` (mock: `push` responses for POST, `routes` for GET). In-game: `/cc-ai/tests/run [suite]`.
 
+Live checks against a real API: `.\tests\live.ps1 -Provider custom -Model <model>` (`tests/live.lua`). They use the emulator data dir `%LOCALAPPDATA%\cc-ai-live`, where the user sets keys themselves. Never read or print its `.settings` file.
+
 ## Architecture
 
 **lib/ai/init.lua** - Main AI SDK: `ai.generateText()`, `ai.streamText()`, `ai.generateObject()`, `ai.tool()`
@@ -44,7 +46,7 @@ The runner mounts the repo read-only at `/cc-ai` in a headless emulator, runs `t
 
 **lib/ai/utils/init.lua** - `httpPost`, `httpPostStream` (line iterator over the buffered body: CC:T has no live HTTP streaming), `parseSSELine`, `getEnv` (settings), `defineSetting`. Non-2xx responses raise with the API's error message.
 
-**lib/ai/google.lua**, **openai.lua**, **groq.lua**, **vercel.lua** - providers. The last three are built on **openai-compat.lua**.
+**lib/ai/google.lua**, **openai.lua**, **groq.lua**, **vercel.lua**, **custom.lua** - providers. All but Google are built on **openai-compat.lua**. `custom` reads its endpoint from the `AI_CUSTOM_BASE_URL` setting at request time, and its key (`AI_CUSTOM_API_KEY`) is optional.
 
 **lib/cmn-utils/** - `json` (rxi/json.lua), `glob`, `grep`, `path` (resolve against `shell.dir()`, yield helper), `text` (UTF-8 to CC charset for display, `fromCC` for user input going to APIs).
 

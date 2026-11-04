@@ -209,6 +209,9 @@ local function checkApiKey(model)
       requiredKey = "GOOGLE_GENERATIVE_AI_API_KEY"
     elseif provider == "groq" then
       requiredKey = "GROQ_API_KEY"
+    elseif provider == "custom" then
+      -- The key is optional (local servers), but the endpoint is not
+      requiredKey = "AI_CUSTOM_BASE_URL"
     end
   else
     -- Unknown model type, can't check
@@ -292,13 +295,18 @@ function agent.process(input, callbacks)
   -- Check if API key is configured
   local hasKey, requiredKey, provider = checkApiKey(agent.config.model)
   if not hasKey then
+    local model = agent.config.model
+    local modelName = type(model) == "table" and ((model.provider or "?") .. ":" .. tostring(model.modelId)) or tostring(model)
+    local isKey = requiredKey:match("_KEY$") ~= nil
     local errorMsg = string.format(
-      "No API key found. Please set your API key:\n\n" ..
-      "1. Exit and run: set %s <key>\n" ..
+      "%s Please set it:\n\n" ..
+      "1. Exit and run: set %s %s\n" ..
       "2. Or use /model command to switch to a different provider\n\n" ..
       "Current model: %s (requires %s provider)",
+      isKey and "No API key found." or ("No " .. requiredKey .. " set."),
       requiredKey,
-      agent.config.model,
+      isKey and "<key>" or "<url>",
+      modelName,
       provider
     )
 

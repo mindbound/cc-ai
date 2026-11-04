@@ -61,6 +61,26 @@ local function parseResponse(response)
   }
 end
 
+-- Full chat completions URL. The base URL may be given with or without a
+-- trailing slash or "/chat/completions" (as some providers document it).
+local function chatURL(config)
+  local base = config.getBaseURL()
+  if type(base) ~= "string" or base == "" then
+    error(config.baseURLError or "No base URL configured for this provider.", 0)
+  end
+  base = base:gsub("/+$", "")
+  base = base:gsub("/chat/completions$", "")
+  return base .. "/chat/completions"
+end
+
+local function checkApiKey(config)
+  if config.apiKeyOptional then return end
+  local apiKey = config.getApiKey()
+  if not apiKey or apiKey == "" then
+    error("API key is required. " .. config.apiKeyError, 0)
+  end
+end
+
 local function createLanguageModel(modelId, config)
   local model = {
     modelId = modelId,
@@ -68,12 +88,9 @@ local function createLanguageModel(modelId, config)
   }
 
   function model.doGenerate(opts)
-    local apiKey = config.getApiKey()
-    if not apiKey or apiKey == "" then
-      error("API key is required. " .. config.apiKeyError, 0)
-    end
+    checkApiKey(config)
 
-    local url = config.baseURL .. "/chat/completions"
+    local url = chatURL(config)
     local headers = config.getHeaders()
     local messages = buildMessages(opts)
 
@@ -149,12 +166,9 @@ local function createLanguageModel(modelId, config)
   end
 
   function model.doStream(opts, onChunk)
-    local apiKey = config.getApiKey()
-    if not apiKey or apiKey == "" then
-      error("API key is required. " .. config.apiKeyError, 0)
-    end
+    checkApiKey(config)
 
-    local url = config.baseURL .. "/chat/completions"
+    local url = chatURL(config)
     local headers = config.getHeaders()
     local messages = buildMessages(opts)
 
@@ -263,12 +277,23 @@ local function createLanguageModel(modelId, config)
   return model
 end
 
+-- defaults: baseURL, name, envVar (API key setting), apiKeyError, and
+-- optionally baseURLEnvVar (setting read at request time when no baseURL
+-- option is given), baseURLError, apiKeyOptional (keyless local servers)
 local function createProvider(defaults)
   utils.defineSetting(defaults.envVar, "API key for the " .. defaults.name .. " provider (cc-ai)")
+  if defaults.baseURLEnvVar then
+    utils.defineSetting(defaults.baseURLEnvVar, "Base URL for the " .. defaults.name .. " provider (cc-ai)")
+  end
   return function(options)
     options = options or {}
-    local baseURL = options.baseURL or defaults.baseURL
     local providerName = options.name or defaults.name
+
+    local function getBaseURL()
+      return options.baseURL
+        or (defaults.baseURLEnvVar and utils.getEnv(defaults.baseURLEnvVar))
+        or defaults.baseURL
+    end
 
     local function getApiKey()
       return options.apiKey or utils.getEnv(defaults.envVar)
@@ -277,8 +302,13 @@ local function createProvider(defaults)
     local function getHeaders()
       local headers = {
         ["Content-Type"] = "application/json",
-        ["Authorization"] = "Bearer " .. (getApiKey() or ""),
       }
+      local apiKey = getApiKey()
+      if apiKey and apiKey ~= "" then
+        headers["Authorization"] = "Bearer " .. apiKey
+      elseif not defaults.apiKeyOptional then
+        headers["Authorization"] = "Bearer "
+      end
       if options.headers then
         for k, v in pairs(options.headers) do
           headers[k] = v
@@ -289,10 +319,12 @@ local function createProvider(defaults)
 
     local config = {
       provider = providerName,
-      baseURL = baseURL,
+      getBaseURL = getBaseURL,
       getHeaders = getHeaders,
       getApiKey = getApiKey,
       apiKeyError = defaults.apiKeyError,
+      apiKeyOptional = defaults.apiKeyOptional,
+      baseURLError = defaults.baseURLError,
     }
 
     local function createModel(modelId)

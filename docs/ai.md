@@ -58,6 +58,33 @@ ai.generateText({
 })
 ```
 
+### Custom (OpenAI-compatible)
+
+Any endpoint that implements `/chat/completions`: NanoGPT, OpenRouter, LM Studio, llama.cpp, Ollama and so on. Set the endpoint and, if it needs one, the key:
+
+```
+set AI_CUSTOM_BASE_URL https://nano-gpt.com/api/v1
+set AI_CUSTOM_API_KEY <key>
+```
+
+The base URL may also be given with `/chat/completions` on the end, as some providers document it.
+
+```lua
+local ai = require("ai")
+local custom = require("ai.custom")
+
+ai.generateText({
+  model = custom("deepseek/deepseek-v4.1-flash:thinking"),
+  prompt = "Hello",
+})
+
+-- Or configure it in code, e.g. for a second endpoint
+local local_llm = custom.createCustom({ baseURL = "http://localhost:1234/v1" })
+ai.generateText({ model = local_llm("qwen2.5-coder"), prompt = "Hello" })
+```
+
+In-game, CC: Tweaked blocks requests to private addresses (localhost, LAN) by default. To use a server on your own network, allow it in the `http` rules of `computercraft-server.toml`.
+
 ## API
 
 ### generateText
@@ -164,6 +191,8 @@ Run examples from the CraftOS shell:
 - `GOOGLE_GENERATIVE_AI_API_KEY` - For Google provider
 - `OPENAI_API_KEY` - For OpenAI provider
 - `GROQ_API_KEY` - For Groq provider
+- `AI_CUSTOM_BASE_URL` - Endpoint for the custom provider (OpenAI-compatible)
+- `AI_CUSTOM_API_KEY` - Key for the custom provider (optional)
 - `ai.http_timeout` - HTTP idle timeout in seconds, 0-60 (default 60, 0 = none)
 
 The timeout counts seconds without any data from the server, and CC: Tweaked rejects values above 60. A non-streaming reply sends nothing until it is complete, so very long answers can hit it: pass `timeout = 0`, or use `streamText`, which keeps data flowing.

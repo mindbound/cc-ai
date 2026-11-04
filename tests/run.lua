@@ -19,7 +19,9 @@ local realHttp = http
 http = { post = T.http.post, get = T.http.get, checkURL = function() return true end }
 
 local savedSettings = {}
-for _, name in ipairs({ "AI_GATEWAY_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY" }) do
+local SAVED = { "AI_GATEWAY_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
+  "AI_CUSTOM_API_KEY", "AI_CUSTOM_BASE_URL", "ai.http_timeout" }
+for _, name in ipairs(SAVED) do
   savedSettings[name] = settings.get(name)
 end
 
@@ -50,7 +52,9 @@ end
 
 -- Restore the environment
 http = realHttp
-for name, value in pairs(savedSettings) do
+-- (iterate the names: pairs() would skip settings that were unset before)
+for _, name in ipairs(SAVED) do
+  local value = savedSettings[name]
   if value == nil then settings.unset(name) else settings.set(name, value) end
 end
 if fs.exists(T.tmp) then fs.delete(T.tmp) end

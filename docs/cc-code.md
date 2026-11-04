@@ -48,6 +48,7 @@ print(text)
 | `/model google <model>` | Use Google directly |
 | `/model openai <model>` | Use OpenAI directly |
 | `/model groq <model>` | Use Groq directly |
+| `/model custom <model>` | Use the OpenAI-compatible endpoint in `AI_CUSTOM_BASE_URL` |
 | `/turtle <prompt>` | Ask a turtle programming question with the quick API reference |
 | `/turtle full <prompt>` | Same, with the full API reference (`docs/turtle.md`) |
 | `/clear` | Clear conversation history |
@@ -107,6 +108,8 @@ API keys are stored as settings with the `set` program. They're saved in `/.sett
 | `GOOGLE_GENERATIVE_AI_API_KEY` | For Google direct (`/model google <model>`) |
 | `OPENAI_API_KEY` | For OpenAI direct (`/model openai <model>`) |
 | `GROQ_API_KEY` | For Groq direct (`/model groq <model>`) |
+| `AI_CUSTOM_BASE_URL` | Endpoint for `/model custom <model>`, e.g. `https://nano-gpt.com/api/v1` |
+| `AI_CUSTOM_API_KEY` | Key for the custom endpoint (optional) |
 | `ai.http_timeout` | HTTP idle timeout for SDK scripts, 0-60 (default 60). cc-code itself uses none |
 
 ### Project instructions (.cc-code.md / CLAUDE.md)
@@ -159,6 +162,11 @@ Groq:
 ```
 /model groq llama-3.3-70b-versatile
 /model groq openai/gpt-oss-120b
+```
+
+Custom endpoint (after `set AI_CUSTOM_BASE_URL https://nano-gpt.com/api/v1`):
+```
+/model custom deepseek/deepseek-v4.1-flash:thinking
 ```
 
 ## API Reference
