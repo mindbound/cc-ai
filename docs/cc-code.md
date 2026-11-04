@@ -5,7 +5,7 @@ Interactive AI coding agent for ComputerCraft: Tweaked.
 ## Installation
 
 ```
-wget run https://raw.githubusercontent.com/DonChong2000/cc-ai/main/install.lua
+wget run https://raw.githubusercontent.com/mindbound/cc-ai/main/install.lua
 ```
 
 ## Usage

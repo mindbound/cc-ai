@@ -1,11 +1,11 @@
 -- cc-ai installer
--- In-game:  wget run https://raw.githubusercontent.com/DonChong2000/cc-ai/main/install.lua
+-- In-game:  wget run https://raw.githubusercontent.com/mindbound/cc-ai/main/install.lua
 -- Options:  install [owner/repo] [branch] [directory]
 -- Installs lib/, bin/, docs/, examples/ and tests/ into /cc-ai and adds a
 -- startup file that puts cc-code on the shell path.
 
 local args = { ... }
-local REPO = args[1] or "DonChong2000/cc-ai"
+local REPO = args[1] or "mindbound/cc-ai"
 local BRANCH = args[2] or "main"
 local DIR = "/" .. fs.combine(args[3] or "/cc-ai", "")
 local STARTUP = "/startup/cc-ai.lua"
