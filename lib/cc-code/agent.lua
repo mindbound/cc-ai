@@ -139,8 +139,9 @@ You have: read_file, write_file, edit_file, list_directory, glob, grep, shell.
       if handle then
         local content = handle.readAll()
         handle.close()
-        if content and #content > 0 then
-          local truncated = #content > f.cap
+        local contentLen = content and text.byteLen(content) or 0
+        if contentLen > 0 then
+          local truncated = contentLen > f.cap
           table.insert(parts, "\n## Project Instructions (" .. f.name .. ")\n" ..
             content:sub(1, f.cap) .. (truncated and "\n[truncated]" or ""))
           break

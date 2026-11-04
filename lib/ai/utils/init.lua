@@ -59,10 +59,9 @@ local function post(url, headers, body, timeout)
     body = body,
     headers = headers,
     timeout = getTimeout(timeout),
-    -- Binary mode: in CC: Tweaked 1.120 a text-mode response containing
-    -- non-ASCII UTF-8 reports a length in characters while holding bytes,
-    -- so anything using # on it (the JSON decoder, string.sub, ..) stops
-    -- early. Binary-mode handles return a plain byte string.
+    -- Binary mode: the reply exactly as sent. (With the "CC: Tweaked
+    -- Unicode Support" mod, text-mode reads re-encode bytes that aren't
+    -- valid UTF-8.)
     binary = true,
   })
   if response then

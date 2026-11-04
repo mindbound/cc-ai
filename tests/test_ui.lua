@@ -380,4 +380,289 @@ return function(T)
     })
     T.contains(screen(win), "Goodbye!")
   end)
+
+  -- "CC: Tweaked Unicode Support" mod ---------------------------------------
+  -- T.withUnicodeMod installs the mod's `unicode` table. The emulator's
+  -- window still counts bytes, so the TUI draws into a fake window that
+  -- stores one cell per character (by the mod's rules) and records writes
+  -- that run past the right edge.
+
+  local tui = require("cc-code.tui")
+  local terminal = require("cc-code.terminal")
+  local DASH = "\226\128\148" -- em dash, 3 bytes, 1 cell under the mod
+  local EACUTE = "\195\169"   -- é in UTF-8, 2 bytes, 1 cell
+
+  local function cellWindow(w, h)
+    local t = { overflow = 0 }
+    local rows, cx, cy, blink = {}, 1, 1, false
+    local function blank()
+      rows = {}
+      for y = 1, h do
+        rows[y] = {}
+        for x = 1, w do rows[y][x] = " " end
+      end
+    end
+    blank()
+    function t.write(s)
+      local n = unicode.len(s)
+      for k = 1, n do
+        local x = cx + k - 1
+        if x < 1 or x > w then
+          t.overflow = t.overflow + 1
+        elseif cy >= 1 and cy <= h then
+          rows[cy][x] = unicode.sub(s, k, k)
+        end
+      end
+      cx = cx + n
+    end
+    function t.clear() blank() end
+    function t.setCursorPos(x, y) cx, cy = x, y end
+    function t.getCursorPos() return cx, cy end
+    function t.setCursorBlink(b) blink = b end
+    function t.getCursorBlink() return blink end
+    function t.setVisible() end
+    function t.setTextColour() end
+    function t.setBackgroundColour() end
+    function t.setPaletteColour() end
+    function t.reposition(_, _, nw, nh)
+      w, h = nw or w, nh or h
+      blank()
+    end
+    -- Cells of row y, and the row as text without trailing spaces
+    function t.cells(y) return rows[y] end
+    function t.text(y) return (table.concat(rows[y]):gsub("%s+$", "")) end
+    -- Content columns 2..w-1 of rows a..b joined (for text split by wrapping)
+    function t.joined(a, b)
+      local out = {}
+      for y = a, b do
+        local row = {}
+        for x = 2, w - 1 do row[#row + 1] = rows[y][x] end
+        out[#out + 1] = (table.concat(row):gsub("%s+$", ""))
+      end
+      return table.concat(out)
+    end
+    return t
+  end
+
+  -- Start the TUI on a w x h cell window; returns it and a cleanup function
+  local function cellTUI(w, h)
+    local parentWin = window.create(term.current(), 1, 1, w, h, false)
+    local old = term.redirect(parentWin)
+    local realWindow = window
+    local cw = cellWindow(w, h)
+    window = { create = function() return cw end }
+    local ok, err = pcall(tui.init, {})
+    window = realWindow
+    if not ok then
+      term.redirect(old)
+      error(err, 0)
+    end
+    return cw, function()
+      tui.cleanup()
+      term.redirect(old)
+    end
+  end
+
+  -- Run tui.readInput while feeding steps (as in runUI)
+  local function driveRead(steps)
+    local result, err, done
+    parallel.waitForAny(function()
+      local ok, r = pcall(tui.readInput)
+      if ok then result = r else err = r end
+      done = true
+    end, function()
+      tick()
+      for _, step in ipairs(steps) do
+        if done then break end
+        if type(step) == "string" and keys[step] then
+          os.queueEvent("key", keys[step], false)
+        elseif type(step) == "string" then
+          for c in step:gmatch(".") do os.queueEvent("char", c) end
+        elseif type(step) == "table" then
+          os.queueEvent(table.unpack(step))
+        else
+          step()
+        end
+        tick()
+      end
+      for _ = 1, 5 do
+        if done then return end
+        tick()
+      end
+    end)
+    if err then error(err, 0) end
+    T.ok(done, "readInput did not return")
+    return result
+  end
+
+  -- Is every cell one complete character (no stray UTF-8 bytes)?
+  local function wholeCells(cw, a, b, allowed)
+    for y = a, b do
+      for _, cell in ipairs(cw.cells(y)) do
+        if not allowed[cell] then return false, "row " .. y .. ": " .. string.format("%q", cell) end
+      end
+    end
+    return true
+  end
+
+  T.test("unicode mod: messages are wrapped by cell width", function()
+    T.withUnicodeMod(function()
+      local cw, done = cellTUI(30, 12)
+      local ok, err = pcall(function()
+        tui.print("na\195\175ve " .. DASH .. " caf" .. EACUTE)
+        local row = cw.cells(2)
+        T.eq(row[2], "n")
+        T.eq(row[4], "\195\175", "i-diaeresis in one cell")
+        T.eq(row[8], DASH, "em dash in one cell")
+        T.eq(row[13], EACUTE, "e-acute in one cell")
+        T.eq(row[14], " ", "nothing after the 12 characters")
+
+        -- 10 words of 3 cells (6 bytes) each: 7 fit in the 28 content cells
+        local word = DASH .. EACUTE .. "x"
+        tui.print(string.rep(word .. " ", 10))
+        T.eq(cw.text(3), " " .. string.rep(word, 7, " "), "first wrapped row")
+        T.eq(cw.text(4), " " .. string.rep(word, 3, " "), "second wrapped row")
+
+        -- A long word is split by cells, never inside a character
+        tui.print(string.rep(DASH, 40))
+        T.eq(cw.text(5), " " .. string.rep(DASH, 28))
+        T.eq(cw.text(6), " " .. string.rep(DASH, 12))
+        T.eq(cw.overflow, 0, "cells written past the right edge")
+      end)
+      done()
+      if not ok then error(err, 0) end
+    end)
+  end)
+
+  T.test("unicode mod: input is edited by cells", function()
+    T.withUnicodeMod(function()
+      local cw, done = cellTUI(30, 12)
+      local ok, err = pcall(function()
+        local seen = {}
+        local res = driveRead({
+          { "char", DASH }, { "char", "x" }, "left",
+          function() seen.afterLeft = { cw.getCursorPos() } end,
+          "backspace",
+          function()
+            seen.afterBackspace = { cw.getCursorPos() }
+            seen.line = cw.text(12)
+          end,
+          -- Latin-1 arrives as one byte, other characters as UTF-8
+          { "char", "\233" }, "end", { "char", DASH },
+          function() seen.cursor = { cw.getCursorPos() } end,
+          "enter",
+        })
+        T.eq(seen.afterLeft[1], 5, "cursor after Left (cell 1)")
+        T.eq(seen.afterBackspace[1], 4, "cursor after Backspace (cell 0)")
+        T.eq(seen.line, " > x", "Backspace removed the whole em dash")
+        T.eq(seen.cursor[1], 7, "cursor after 3 characters")
+        T.eq(res, "\233x" .. DASH)
+
+        -- Ctrl+Left/Right word jumps and Delete
+        res = driveRead({
+          { "char", DASH }, { "char", DASH }, { "char", " " }, { "char", EACUTE }, { "char", "y" },
+          "leftCtrl", "left", { "key_up", keys.leftCtrl },
+          function() seen.word = { cw.getCursorPos() } end,
+          "delete", "enter",
+        })
+        T.eq(seen.word[1], 4 + 3, "Ctrl+Left to the start of the word")
+        T.eq(res, DASH .. DASH .. " y")
+
+        -- A long line scrolls sideways inside the screen
+        res = driveRead({
+          function()
+            for _ = 1, 40 do os.queueEvent("char", DASH) end
+          end,
+          function()
+            seen.long = { cw.getCursorPos() }
+            seen.longLine = cw.text(12)
+          end,
+          "enter",
+        })
+        T.eq(res, string.rep(DASH, 40))
+        T.ok(seen.long[1] <= 29, "cursor inside the screen: " .. seen.long[1])
+        T.eq(cw.overflow, 0, "cells written past the right edge")
+        T.ok(wholeCells(cw, 12, 12, { [" "] = true, [">"] = true, [DASH] = true }))
+      end)
+      done()
+      if not ok then error(err, 0) end
+    end)
+  end)
+
+  T.test("unicode mod: tool previews are cut by cells", function()
+    T.withUnicodeMod(function()
+      local cw, done = cellTUI(51, 19)
+      local ok, err = pcall(function()
+        tui.printToolResult("read_file", string.rep(DASH, 300))
+        -- "<< " + 197 dashes + "..." = 203 cells: rows 2-6 of 49 cells
+        T.eq(cw.joined(2, 6), "<< " .. string.rep(DASH, 197) .. "...")
+        T.ok(wholeCells(cw, 2, 6, { [" "] = true, ["<"] = true, ["."] = true, [DASH] = true }))
+
+        tui.clear()
+        tui.printToolCall("write_file", { text = string.rep(EACUTE, 150) })
+        -- '{"text":"' is 9 cells, so 88 characters fit in the 97 before "..."
+        -- "   " + 100 cells = 103: rows 3-5
+        T.eq(cw.joined(3, 5), '   {"text":"' .. string.rep(EACUTE, 88) .. "...")
+        T.eq(cw.overflow, 0)
+      end)
+      done()
+      if not ok then error(err, 0) end
+    end)
+
+    -- Terminal mode cuts the same way (100 cells for results)
+    T.withUnicodeMod(function()
+      local rec = capture.createTerminal(400, 20)
+      local old = term.redirect(rec)
+      local ok, err = pcall(terminal.printToolResult, "x", string.rep(DASH, 150))
+      term.redirect(old)
+      if not ok then error(err, 0) end
+      T.eq(rec.getText(), "<< " .. string.rep(DASH, 97) .. "...")
+    end)
+  end)
+
+  T.test("unicode mod: UTF-8 is drawn as is, converted without the mod", function()
+    local sample = "caf" .. EACUTE .. " " .. DASH .. " ok"
+    T.withUnicodeMod(function()
+      local cw, done = cellTUI(30, 12)
+      local ok, err = pcall(function()
+        tui.print(sample)
+        T.eq(cw.text(2), " " .. sample)
+        -- Streamed text: a sequence split across chunks is held back
+        tui.streamText("na\195")
+        tui.streamText("\175ve")
+        tui.endStream()
+        T.eq(cw.text(3), " na\195\175ve")
+        tui.setStatus("Running " .. DASH)
+        T.eq(cw.text(11), " Running " .. DASH)
+      end)
+      done()
+      if not ok then error(err, 0) end
+
+      local rec = capture.createTerminal(80, 20)
+      local old = term.redirect(rec)
+      ok, err = pcall(terminal.print, sample)
+      term.redirect(old)
+      if not ok then error(err, 0) end
+      T.eq(rec.getText(), sample)
+    end)
+
+    -- Vanilla: converted to the CC charset
+    local win = window.create(term.current(), 1, 1, 30, 12, false)
+    local old = term.redirect(win)
+    local ok, err = pcall(function()
+      tui.init({})
+      tui.print(sample)
+      T.eq((win.getLine(2)):gsub("%s+$", ""), " caf\233 - ok")
+      tui.cleanup()
+    end)
+    term.redirect(old)
+    if not ok then error(err, 0) end
+
+    local rec = capture.createTerminal(80, 20)
+    old = term.redirect(rec)
+    ok, err = pcall(terminal.print, sample)
+    term.redirect(old)
+    if not ok then error(err, 0) end
+    T.eq(rec.getText(), "caf\233 - ok")
+  end)
 end

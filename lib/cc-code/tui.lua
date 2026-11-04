@@ -1,12 +1,22 @@
 -- cc-code/tui.lua
 -- Text User Interface for cc-code (ComputerCraft: Tweaked)
 --
--- Draws into a window on the current terminal. Text is handled as CC charset
--- (one byte per glyph); everything coming from the model is converted from
--- UTF-8 once, when it is added to the content history.
+-- Draws into a window on the current terminal. Everything coming from the
+-- model is prepared for display once (cmn-utils.text forDisplay), when it is
+-- added to the content history. All measuring and clipping is in screen
+-- cells (text.width / text.sub): one byte per cell on vanilla CC: Tweaked,
+-- one UTF-8 character per cell with the "CC: Tweaked Unicode Support" mod,
+-- which also changes what # returns, so # is never used on strings here.
 
 local json = require("cmn-utils.json")
 local cctext = require("cmn-utils.text")
+
+local width, csub = cctext.width, cctext.sub
+
+-- Is s wider than n cells? (Cheap on vanilla: no full-length scan)
+local function longerThan(s, n)
+  return csub(s, n + 1, n + 1) ~= ""
+end
 
 -- The CC colour API ("tui.colors" below is the table of UI roles)
 local ccColors = colors
@@ -173,13 +183,13 @@ local function put(x, y, s, fg, bg, maxX)
   if y < 1 or y > state.height or s == "" then return end
   maxX = math.min(maxX or state.width, state.width)
   if x < 1 then
-    s = s:sub(2 - x)
+    s = csub(s, 2 - x)
     x = 1
   end
   local avail = maxX - x + 1
   if avail <= 0 then return end
-  if #s > avail then
-    s = s:sub(1, avail)
+  if longerThan(s, avail) then
+    s = csub(s, 1, avail)
   end
   win.setTextColour(fg)
   win.setBackgroundColour(bg)
@@ -235,12 +245,12 @@ local function draw(fn, ...)
   end
 end
 
--- Truncate s to max bytes, marking the cut with ".."
+-- Truncate s to max cells, marking the cut with ".."
 local function truncate(s, max)
   if max <= 0 then return "" end
-  if #s <= max then return s end
-  if max <= 2 then return s:sub(1, max) end
-  return s:sub(1, max - 2) .. ".."
+  if not longerThan(s, max) then return s end
+  if max <= 2 then return csub(s, 1, max) end
+  return csub(s, 1, max - 2) .. ".."
 end
 
 ---------------------------------------------------------------------------
@@ -253,16 +263,19 @@ local function getContentBounds()
   return 2, 2, math.max(1, state.width - 2), math.max(0, state.height - 3)
 end
 
--- Wrap one line (no newlines) to width, appending lines to out
-local function wrapLine(line, width, color, out)
-  while #line > width do
-    -- Break after the last word that fits; keep leading indentation
-    local cut = line:sub(1, width + 1):match("^.*%S() ")
+-- Wrap one line (no newlines) to cols cells, appending lines to out
+local function wrapLine(line, cols, color, out)
+  while longerThan(line, cols) do
+    -- Break after the last word that fits; keep leading indentation.
+    -- The head is a byte prefix of line and a space byte never occurs
+    -- inside a UTF-8 sequence, so the byte position found in it is a safe
+    -- place to cut line with string.sub.
+    local cut = csub(line, 1, cols + 1):match("^.*%S() ")
     -- A following word too long for any line gets split anyway, so start
     -- it on this line instead of leaving most of the line empty
     if cut then
       local nextWord = line:match("^ +(%S+)", cut)
-      if nextWord and #nextWord > width then
+      if nextWord and longerThan(nextWord, cols) then
         cut = nil
       end
     end
@@ -270,9 +283,10 @@ local function wrapLine(line, width, color, out)
       out[#out + 1] = { text = line:sub(1, cut - 1), color = color }
       line = line:sub(cut):gsub("^ +", "")
     else
-      -- No space to break at: break the long word
-      out[#out + 1] = { text = line:sub(1, width), color = color }
-      line = line:sub(width + 1)
+      -- No space to break at: break the long word (by cells, so a UTF-8
+      -- character is never split)
+      out[#out + 1] = { text = csub(line, 1, cols), color = color }
+      line = csub(line, cols + 1)
     end
   end
   if line ~= "" then
@@ -281,7 +295,7 @@ local function wrapLine(line, width, color, out)
 end
 
 -- Wrap a message into display lines; returns the number of lines added
-local function wrapMessage(msg, width)
+local function wrapMessage(msg, cols)
   local lines = {}
   local str = msg.text
   local start = 1
@@ -289,7 +303,7 @@ local function wrapMessage(msg, width)
     local nl = str:find("\n", start, true)
     local line = str:sub(start, nl and (nl - 1) or -1)
     local before = #lines
-    wrapLine(line, width, msg.color, lines)
+    wrapLine(line, cols, msg.color, lines)
     if #lines == before then
       lines[#lines + 1] = { text = "", color = msg.color }
     end
@@ -302,7 +316,7 @@ local function wrapMessage(msg, width)
   return #lines
 end
 
--- Add an already-converted (CC charset) message to the history
+-- Add an already-prepared (forDisplay) message to the history
 local function addMessage(str, color)
   if not validColors[color] then
     color = tui.colors.foreground
@@ -323,13 +337,13 @@ local function rewrapHistory()
   end
 end
 
--- Convert a value to a display string (CC charset)
+-- Convert a value to a display string
 local function toDisplay(value)
   if type(value) ~= "string" then
     local ok, encoded = pcall(json.encode, value)
     value = ok and encoded or tostring(value)
   end
-  return cctext.toCC(value)
+  return cctext.forDisplay(value)
 end
 
 ---------------------------------------------------------------------------
@@ -399,7 +413,7 @@ end
 
 -- Text shown in the popup's command column
 local function popupCmdText(cmd)
-  local displayCmd = cctext.toCC(tostring(cmd.cmd or ""))
+  local displayCmd = cctext.forDisplay(tostring(cmd.cmd or ""))
   if state.completionType then
     -- Strip the command prefix (e.g., "/model " from "/model google")
     displayCmd = displayCmd:match("^/%S+%s+(.+)$") or displayCmd
@@ -431,8 +445,8 @@ local function drawCommandPopup()
   put(popupX, popupY, headerText, c.foreground, c.status, right)
   if count > maxItems then
     local pos = state.commandPopupIndex .. "/" .. count
-    local px = right - #pos
-    if px > popupX + #headerText then
+    local px = right - width(pos)
+    if px > popupX + width(headerText) then
       put(px, popupY, pos, c.dim, c.status, right)
     end
   end
@@ -445,8 +459,8 @@ local function drawCommandPopup()
     -- to the items so as little as possible is cut off
     local longestCmd, longestDesc = 0, 0
     for _, cmd in ipairs(state.filteredCommands) do
-      longestCmd = math.max(longestCmd, #popupCmdText(cmd))
-      longestDesc = math.max(longestDesc, #tostring(cmd.desc or ""))
+      longestCmd = math.max(longestCmd, width(popupCmdText(cmd)))
+      longestDesc = math.max(longestDesc, width(cctext.forDisplay(tostring(cmd.desc or ""))))
     end
     local cmdNeed = math.min(maxCmdLen, longestCmd)
     if popupWidth - 4 - cmdNeed >= longestDesc then
@@ -478,7 +492,7 @@ local function drawCommandPopup()
     if cmd then
       -- For custom completions, show just the argument part
       local displayCmd = popupCmdText(cmd)
-      local descText = cctext.toCC(tostring(cmd.desc or ""))
+      local descText = cctext.forDisplay(tostring(cmd.desc or ""))
 
       put(popupX + 1, y, truncate(displayCmd, maxCmdLen), fg, bg, right)
       if maxDescLen > 0 then
@@ -491,7 +505,7 @@ local function drawCommandPopup()
   local hintY = popupY + maxItems + 1
   fill(popupX, hintY, popupWidth, c.status)
   for _, hint in ipairs(state.popupNavigated and popupNavHints or popupHints) do
-    if #hint <= popupWidth - 1 then
+    if width(hint) <= popupWidth - 1 then
       put(popupX + 1, hintY, hint, c.dim, c.status, right)
       break
     end
@@ -508,8 +522,8 @@ local function drawHeaderBar()
   local title = "cc-code"
   put(2, 1, title, c.assistant, c.status)
   for _, hint in ipairs(headerHints) do
-    local hx = state.width - #hint - 1
-    if hx >= 2 + #title + 1 then
+    local hx = state.width - width(hint) - 1
+    if hx >= 2 + width(title) + 1 then
       put(hx, 1, hint, c.dim, c.status)
       break
     end
@@ -526,10 +540,10 @@ local function drawStatusBar()
   -- Show scroll indicator
   if state.scrollOffset > 0 then
     local scrollText = string.format("[Scroll: %d lines up]", state.scrollOffset)
-    if state.width - #scrollText - 1 < 2 + #state.status + 1 then
+    if state.width - width(scrollText) - 1 < 2 + width(state.status) + 1 then
       scrollText = string.format("[%d up]", state.scrollOffset)
     end
-    put(math.max(1, state.width - #scrollText - 1), y, scrollText, c.tool, c.status)
+    put(math.max(1, state.width - width(scrollText) - 1), y, scrollText, c.tool, c.status)
   end
 end
 
@@ -564,12 +578,12 @@ local function drawInputLine()
   local displayText = state.inputBuffer
   local visibleCursorPos = state.inputCursor
 
-  if #displayText > maxWidth then
+  if longerThan(displayText, maxWidth) then
     -- Keep some context to the right of the cursor (10 columns on wide
     -- screens, less on narrow ones)
     local margin = math.max(1, math.min(10, math.floor(maxWidth / 4)))
     local start = math.max(1, state.inputCursor - maxWidth + margin)
-    displayText = state.inputBuffer:sub(start, start + maxWidth - 1)
+    displayText = csub(state.inputBuffer, start, start + maxWidth - 1)
     visibleCursorPos = state.inputCursor - (start - 1)
   end
 
@@ -670,7 +684,7 @@ end
 
 -- Set status message
 function tui.setStatus(msg)
-  state.status = cctext.toCC(tostring(msg or "Ready"))
+  state.status = cctext.forDisplay(tostring(msg or "Ready"))
   tui.drawStatus()
 end
 
@@ -699,7 +713,7 @@ end
 
 -- Print message to content area
 function tui.print(msg, color)
-  addMessage(cctext.toCC(tostring(msg)), color or tui.colors.foreground)
+  addMessage(cctext.forDisplay(tostring(msg)), color or tui.colors.foreground)
   -- Auto-scroll to bottom when new content is added
   state.scrollOffset = 0
   tui.redrawContent()
@@ -734,8 +748,8 @@ function tui.printToolCall(name, args)
   tui.print(">> " .. tostring(name), tui.colors.toolName)
   if args then
     local argsStr = toDisplay(args)
-    if #argsStr > 100 then
-      argsStr = argsStr:sub(1, 97) .. "..."
+    if longerThan(argsStr, 100) then
+      argsStr = csub(argsStr, 1, 97) .. "..."
     end
     addMessage("   " .. argsStr, tui.colors.dim)
     tui.redrawContent()
@@ -746,8 +760,8 @@ end
 function tui.printToolResult(name, result)
   if not state.showTools then return end
   local resultStr = toDisplay(result)
-  if #resultStr > 200 then
-    resultStr = resultStr:sub(1, 197) .. "..."
+  if longerThan(resultStr, 200) then
+    resultStr = csub(resultStr, 1, 197) .. "..."
   end
   addMessage("<< " .. resultStr, tui.colors.dim)
   state.scrollOffset = 0
@@ -832,19 +846,20 @@ local function selectCommand()
   if state.showCommandPopup and state.filteredCommands[state.commandPopupIndex] then
     local cmd = state.filteredCommands[state.commandPopupIndex].cmd
     state.inputBuffer = cmd .. " "
-    state.inputCursor = #state.inputBuffer
+    state.inputCursor = width(state.inputBuffer)
     hideCommandPopup()
     return true
   end
   return false
 end
 
--- Insert text at the cursor
+-- Insert text at the cursor (a cell index)
 local function insertText(str)
-  state.inputBuffer = state.inputBuffer:sub(1, state.inputCursor) ..
-                      str ..
-                      state.inputBuffer:sub(state.inputCursor + 1)
-  state.inputCursor = state.inputCursor + #str
+  local before = csub(state.inputBuffer, 1, state.inputCursor) .. str
+  state.inputBuffer = before .. csub(state.inputBuffer, state.inputCursor + 1)
+  -- Measured rather than added: with the unicode mod, lone Latin-1 bytes
+  -- next to each other can join into one UTF-8 character
+  state.inputCursor = math.min(width(before), width(state.inputBuffer))
   inputEdited()
 end
 
@@ -855,7 +870,7 @@ local function showHistoryEntry()
   else
     state.inputBuffer = state.commandHistory[#state.commandHistory - state.historyIndex + 1]
   end
-  state.inputCursor = #state.inputBuffer
+  state.inputCursor = width(state.inputBuffer)
   -- A recalled line is sent as it is: keep the popup closed (so Up/Down keep
   -- browsing history) until the next edit or Tab. readInput's loop redraws
   -- the content area under the old popup.
@@ -875,7 +890,7 @@ local function cyclePopup(delta, updateInput)
     local cmd = state.filteredCommands[state.commandPopupIndex]
     if cmd then
       state.inputBuffer = cmd.cmd
-      state.inputCursor = #state.inputBuffer
+      state.inputCursor = width(state.inputBuffer)
     end
   end
   state.popupNavigated = true
@@ -891,7 +906,7 @@ local function handleKey(code)
       -- The user picked an entry with Tab/Up/Down: take it
       selectCommand()
     elseif state.showCommandPopup and state.completionType == nil and
-           #state.filteredCommands == 1 and #buf < #only.cmd then
+           #state.filteredCommands == 1 and width(buf) < width(only.cmd) then
       -- An unfinished command with one match ("/he"): complete it
       state.commandPopupIndex = 1
       selectCommand()
@@ -913,7 +928,7 @@ local function handleKey(code)
       local cur = state.filteredCommands[state.commandPopupIndex]
       if cur and state.inputBuffer ~= cur.cmd then
         state.inputBuffer = cur.cmd
-        state.inputCursor = #state.inputBuffer
+        state.inputCursor = width(state.inputBuffer)
         state.popupNavigated = true
       else
         cyclePopup(1, true)
@@ -922,14 +937,15 @@ local function handleKey(code)
 
   elseif code == keys.backspace then
     if state.inputCursor > 0 then
-      state.inputBuffer = buf:sub(1, state.inputCursor - 1) .. buf:sub(state.inputCursor + 1)
-      state.inputCursor = state.inputCursor - 1
+      state.inputBuffer = csub(buf, 1, state.inputCursor - 1) .. csub(buf, state.inputCursor + 1)
+      state.inputCursor = math.min(state.inputCursor - 1, width(state.inputBuffer))
       inputEdited()
     end
 
   elseif code == keys.delete then
-    if state.inputCursor < #buf then
-      state.inputBuffer = buf:sub(1, state.inputCursor) .. buf:sub(state.inputCursor + 2)
+    if state.inputCursor < width(buf) then
+      state.inputBuffer = csub(buf, 1, state.inputCursor) .. csub(buf, state.inputCursor + 2)
+      state.inputCursor = math.min(state.inputCursor, width(state.inputBuffer))
       inputEdited()
     end
 
@@ -937,10 +953,10 @@ local function handleKey(code)
     if isCtrlDown() then
       -- Move to previous word boundary
       local pos = state.inputCursor
-      while pos > 0 and buf:sub(pos, pos):match("%s") do
+      while pos > 0 and csub(buf, pos, pos):match("%s") do
         pos = pos - 1
       end
-      while pos > 0 and not buf:sub(pos, pos):match("%s") do
+      while pos > 0 and not csub(buf, pos, pos):match("%s") do
         pos = pos - 1
       end
       state.inputCursor = pos
@@ -951,17 +967,17 @@ local function handleKey(code)
   elseif code == keys.right then
     if isCtrlDown() then
       -- Move to next word boundary
-      local len = #buf
+      local len = width(buf)
       local pos = state.inputCursor
-      while pos < len and not buf:sub(pos + 1, pos + 1):match("%s") do
+      while pos < len and not csub(buf, pos + 1, pos + 1):match("%s") do
         pos = pos + 1
       end
-      while pos < len and buf:sub(pos + 1, pos + 1):match("%s") do
+      while pos < len and csub(buf, pos + 1, pos + 1):match("%s") do
         pos = pos + 1
       end
       state.inputCursor = pos
     else
-      state.inputCursor = math.min(#buf, state.inputCursor + 1)
+      state.inputCursor = math.min(width(buf), state.inputCursor + 1)
     end
 
   elseif code == keys.up then
@@ -1002,7 +1018,7 @@ local function handleKey(code)
     if isCtrlDown() then
       tui.scrollToBottom()
     else
-      state.inputCursor = #buf
+      state.inputCursor = width(buf)
     end
 
   elseif code == keys.pageUp then
@@ -1145,12 +1161,13 @@ function tui.streamText(chunk)
   -- Hold back an incomplete UTF-8 sequence at the end of the chunk
   local raw = msg.pending .. chunk
   local tail = ""
-  local i = #raw
-  while i > 0 and i > #raw - 3 do
+  local rawLen = cctext.byteLen(raw)
+  local i = rawLen
+  while i > 0 and i > rawLen - 3 do
     local b = raw:byte(i)
     if b < 0x80 or b >= 0xC0 then
       local need = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or (b >= 0xC0 and 2) or 1
-      if need > #raw - i + 1 then
+      if need > rawLen - i + 1 then
         tail = raw:sub(i)
         raw = raw:sub(1, i - 1)
       end
@@ -1159,7 +1176,7 @@ function tui.streamText(chunk)
     i = i - 1
   end
   msg.pending = tail
-  msg.text = msg.text .. cctext.toCC(raw)
+  msg.text = msg.text .. cctext.forDisplay(raw)
 
   -- Re-wrap this message
   for _ = 1, msg.lines do
@@ -1179,7 +1196,7 @@ function tui.endStream()
   if msg and msg.streaming then
     msg.streaming = false
     if msg.pending ~= "" then
-      msg.text = msg.text .. cctext.toCC(msg.pending)
+      msg.text = msg.text .. cctext.forDisplay(msg.pending)
       msg.pending = ""
       for _ = 1, msg.lines do
         state.history[#state.history] = nil

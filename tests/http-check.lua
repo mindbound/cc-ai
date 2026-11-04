@@ -2,8 +2,9 @@
 -- Checks whether an OpenAI-compatible endpoint's replies decode in
 -- CC: Tweaked, in text and binary mode, with and without streaming. Uses
 -- AI_CUSTOM_BASE_URL and AI_CUSTOM_API_KEY. The prompt asks for non-ASCII
--- text on purpose: in CC: Tweaked 1.120, a text-mode reply containing
--- multi-byte UTF-8 reported its length (#) in characters, not bytes.
+-- text on purpose. With the "CC: Tweaked Unicode Support" mod, # counts
+-- UTF-8 characters instead of bytes, which broke JSON decoding; "#" next
+-- to "counted" shows whether that is the case.
 --   /cc-ai/tests/http-check deepseek/deepseek-v4.1-flash:thinking
 -- Prints a summary (decode errors with the bytes around them) and saves it
 -- to /http-check.txt; raw replies go to /http-check-<mode>.txt. Never

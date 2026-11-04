@@ -1,6 +1,10 @@
 -- cc-code/terminal.lua
 -- Simple line-mode interface (no full-screen TUI): prints to the current
 -- terminal and reads input with CC's read()
+--
+-- Measuring is in screen cells (text.width / text.sub) and byte work uses
+-- text.byteLen: the "CC: Tweaked Unicode Support" mod changes what # returns,
+-- so # is never used on strings here.
 
 local json = require("cmn-utils.json")
 local cctext = require("cmn-utils.text")
@@ -72,13 +76,21 @@ local function printText(str, color)
   term.setTextColour(ccColors.white)
 end
 
--- Convert a value to a display string (CC charset)
+-- Convert a value to a display string
 local function toDisplay(value)
   if type(value) ~= "string" then
     local ok, encoded = pcall(json.encode, value)
     value = ok and encoded or tostring(value)
   end
-  return cctext.toCC(value)
+  return cctext.forDisplay(value)
+end
+
+-- Shorten s to at most max cells, ending in "..." when cut
+local function preview(s, max)
+  if cctext.sub(s, max + 1, max + 1) == "" then
+    return s
+  end
+  return cctext.sub(s, 1, max - 3) .. "..."
 end
 
 -- Initialize terminal
@@ -91,9 +103,9 @@ function terminal.init(config)
   resetTerminalState()
 end
 
--- Print text (UTF-8 from the model is converted to the CC charset)
+-- Print text (UTF-8 from the model, prepared for this terminal)
 function terminal.print(msg, color)
-  printText(cctext.toCC(tostring(msg)), color)
+  printText(cctext.forDisplay(tostring(msg)), color)
 end
 
 -- Print with role prefix
@@ -116,24 +128,16 @@ end
 -- Print tool call
 function terminal.printToolCall(name, args)
   if not state.showTools then return end
-  printText(">> " .. cctext.toCC(tostring(name)), terminal.colors.toolName)
+  printText(">> " .. cctext.forDisplay(tostring(name)), terminal.colors.toolName)
   if args then
-    local argsStr = toDisplay(args)
-    if #argsStr > 80 then
-      argsStr = argsStr:sub(1, 77) .. "..."
-    end
-    printText("   " .. argsStr, terminal.colors.dim)
+    printText("   " .. preview(toDisplay(args), 80), terminal.colors.dim)
   end
 end
 
 -- Print tool result
 function terminal.printToolResult(name, result)
   if not state.showTools then return end
-  local resultStr = toDisplay(result)
-  if #resultStr > 100 then
-    resultStr = resultStr:sub(1, 97) .. "..."
-  end
-  printText("<< " .. resultStr, terminal.colors.dim)
+  printText("<< " .. preview(toDisplay(result), 100), terminal.colors.dim)
   -- Reset terminal state after tool execution to prevent color bleed
   resetTerminalState()
 end
@@ -149,13 +153,15 @@ function terminal.registerCompletion(prefix, handler, label)
   completionHandlers[prefix:lower()] = { handler = handler, label = label }
 end
 
--- Suffixes that complete line to one of choices (case-insensitive)
+-- Suffixes that complete line to one of choices (case-insensitive). A byte
+-- prefix match: the suffix is whatever follows the typed bytes.
 local function suffixes(line, choices)
   local lowerLine = line:lower()
+  local lineLen = cctext.byteLen(line)
   local out = {}
   for _, choice in ipairs(choices) do
-    if #choice > #line and choice:sub(1, #line):lower() == lowerLine then
-      out[#out + 1] = choice:sub(#line + 1)
+    if cctext.byteLen(choice) > lineLen and choice:sub(1, lineLen):lower() == lowerLine then
+      out[#out + 1] = choice:sub(lineLen + 1)
     end
   end
   return out

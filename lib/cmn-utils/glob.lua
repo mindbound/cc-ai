@@ -2,6 +2,7 @@
 -- File pattern matching utility for CraftOS
 
 local path = require("cmn-utils.path")
+local byteLen = require("cmn-utils.text").byteLen
 
 local glob = {}
 
@@ -29,7 +30,8 @@ local function globToPatterns(globPat)
     end
   end
   local i = 1
-  while i <= #globPat do
+  local patLen = byteLen(globPat)
+  while i <= patLen do
     if globPat:sub(i, i + 2) == "**/" then
       local nextVariants = {}
       for _, v in ipairs(variants) do

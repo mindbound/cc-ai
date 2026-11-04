@@ -48,7 +48,7 @@ Live checks against a real API: `.\tests\live.ps1 -Provider custom -Model <model
 
 **lib/ai/google.lua**, **openai.lua**, **groq.lua**, **vercel.lua**, **custom.lua** - providers. All but Google are built on **openai-compat.lua**. `custom` reads its endpoint from the `AI_CUSTOM_BASE_URL` setting at request time, and its key (`AI_CUSTOM_API_KEY`) is optional. It sends `generateText` through streamed replies (`streamResponses`), so slow thinking models don't hit the idle timeout.
 
-All HTTP requests use `binary = true`. In CC: Tweaked 1.120.2, a text-mode response containing multi-byte UTF-8 reported its length (`#`) in characters while holding bytes, so `json.decode` and anything else bounded by `#` stopped early. CraftOS-PC (CC 1.112) doesn't show this. `tests/http-check.lua` compares text and binary mode in-game.
+All HTTP requests use `binary = true`, so replies arrive exactly as sent (the unicode mod below re-encodes text-mode reads). `tests/http-check.lua` checks in-game that replies with non-ASCII text decode.
 
 **lib/cmn-utils/** - `json` (rxi/json.lua), `glob`, `grep`, `path` (resolve against `shell.dir()`, yield helper), `text` (UTF-8 to CC charset for display, `fromCC` for user input going to APIs).
 
@@ -76,6 +76,7 @@ All HTTP requests use `binary = true`. In CC: Tweaked 1.120.2, a text-mode respo
 - Lua 5.2 (Cobalt): no `//`, no bitwise operators (use `bit32`), no `string.pack`. `goto` and `utf8` work
 - Programs must yield at least every ~7s ("Too long without yielding"). Long scans call `cmn-utils.path.maybeYield()`
 - Compare key events against `keys.*` names only: MC 1.21 uses GLFW key codes, while CraftOS-PC uses LWJGL2 codes
-- Terminal is one byte per glyph (ISO-8859-1 plus CC drawing chars), not UTF-8. Pass displayed model text through `cmn-utils.text.toCC`
+- Never use `#` or `string.len` on strings for byte work. The "CC: Tweaked Unicode Support" mod (installed in the user's game) makes them count UTF-8 characters, while `string.sub/byte/find` stay byte-based. Use `cmn-utils.text.byteLen` (it uses `string.find`; don't use `rawlen` either, because CraftOS-PC's returns 0 for strings made by `sub` or `..`)
+- Display text goes through `text.forDisplay`, and is measured and clipped with `text.width` / `text.sub` (screen cells). Vanilla CC draws one byte per cell (ISO-8859-1 plus CC drawing chars), so `forDisplay` converts UTF-8 there. With the mod, the terminal draws UTF-8 (one cell per character) and `forDisplay` keeps it. Tests can simulate the mod with `T.withUnicodeMod`; real behaviour can only be checked in-game
 - Screens are small: 51x19 computer, 39x13 turtle, 26x20 pocket
 - Read and write files in binary mode (`"rb"` / `"wb"`) to keep bytes intact

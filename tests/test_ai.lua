@@ -43,7 +43,7 @@ return function(T)
     T.eq(req.json.messages[2].content, "Hi")
     T.eq(req.json.max_tokens, 50)
     T.eq(req.timeout, 60, "default timeout is CC: Tweaked's maximum")
-    T.eq(req.binary, true, "binary mode (text-mode replies misreport their length in CC:T 1.120)")
+    T.eq(req.binary, true, "binary mode: replies exactly as sent")
   end)
 
   T.test("timeouts: per-call option, setting, and clamping to 0-60", function()
