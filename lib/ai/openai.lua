@@ -4,7 +4,7 @@ local createOpenAI = compat.createProvider({
   baseURL = "https://api.openai.com/v1",
   name = "openai",
   envVar = "OPENAI_API_KEY",
-  apiKeyError = "Set OPENAI_API_KEY environment variable or pass apiKey to createOpenAI().",
+  apiKeyError = "Run: set OPENAI_API_KEY <key>, or pass apiKey to createOpenAI().",
 })
 
 local openai = setmetatable({

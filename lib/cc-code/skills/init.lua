@@ -1,7 +1,5 @@
--- oc-code/skills/init.lua
+-- cc-code/skills/init.lua
 -- Skills system for extensible agent capabilities
-
-local fs = require("filesystem")
 
 local skills = {}
 
@@ -74,15 +72,20 @@ end
 
 -- Load skills from directory
 function skills.loadFromDirectory(dir)
-  if not fs.exists(dir) or not fs.isDirectory(dir) then
+  if not fs.exists(dir) or not fs.isDir(dir) then
     return
   end
-  for file in fs.list(dir) do
+  for _, file in ipairs(fs.list(dir)) do
     if file:match("%.lua$") and file ~= "init.lua" then
-      local path = fs.concat(dir, file)
-      local ok, skill = pcall(dofile, path)
-      if ok and skill and skill.name then
-        skills.register(skill)
+      local path = fs.combine(dir, file)
+      -- Load with this module's environment: CraftOS's dofile uses _G,
+      -- which has no `require` (it is per-program)
+      local fn = loadfile(path, "t", _ENV)
+      if fn then
+        local ok, skill = pcall(fn)
+        if ok and type(skill) == "table" and skill.name then
+          skills.register(skill)
+        end
       end
     end
   end

@@ -1,13 +1,19 @@
--- oc-code/agent.lua
--- Core agent logic for oc-code
+-- cc-code/agent.lua
+-- Core agent logic for cc-code
 
 local ai = require("ai")
-local tools = require("oc-code.tools")
-local skills = require("oc-code.skills")
-local fs = require("filesystem")
-local shell = require("shell")
+local aiUtils = require("ai.utils")
+local tools = require("cc-code.tools")
+local skills = require("cc-code.skills")
+local capture = require("cc-code.capture")
+local cmnPath = require("cmn-utils.path")
+local text = require("cmn-utils.text")
 
 local agent = {}
+
+-- Directory this module was loaded from (".../lib/cc-code"), used to find
+-- the built-in skills wherever cc-ai is installed
+local moduleDir = (debug.getinfo(1, "S").source or ""):match("^@(.*)/agent%.lua$")
 
 -- Default configuration
 agent.config = {
@@ -29,24 +35,32 @@ agent.state = {
 local function buildSystemPrompt()
   local parts = {}
 
+  local pwd = agent.state.workingDirectory or cmnPath.cwd()
+  local w, h = term.getSize()
+  local machine = turtle and "turtle" or (pocket and "pocket computer" or "computer")
+  if term.isColour() then
+    machine = "advanced " .. machine
+  end
+
   -- Base system prompt
   table.insert(parts, [[
-You are oc-code, an AI coding assistant running inside Minecraft OpenComputers (OpenOS).
+You are cc-code, an AI coding assistant running inside Minecraft ComputerCraft: Tweaked (CraftOS).
 You help the user write, debug, and run Lua programs on this in-game computer by reading, writing, and editing files and running shell commands.
 
 ## Environment
-- Platform: Minecraft OpenComputers, OpenOS, Lua 5.2 subset
-- Lua 5.2 rules: no integer division `//`, no bitwise operators (use `bit32`), no `string.pack`. `goto` is available.
-- OC APIs via require: `component`, `computer`, `filesystem`, `shell`, `term`, `event`, `internet` (needs internet card), `robot` (robots only), `sides`, `serialization`
-- Hardware is limited: small RAM, small screen. Long loops must yield (`os.sleep(0)` or `event.pull`) or OpenOS kills the program with "too long without yielding".
-- No package manager at runtime; extra libraries only via OPPM. Do not assume LuaRocks or io.popen.
-- Current directory: ]] .. (agent.state.workingDirectory or shell.getWorkingDirectory() or "/home"))
+- Platform: Minecraft ComputerCraft: Tweaked, CraftOS, Lua 5.2 (Cobalt VM)
+- Lua 5.2 rules: no integer division `//`, no bitwise operators (use `bit32`), no `string.pack`. `goto` and the `utf8` library are available.
+- CC APIs are globals (no require): `fs`, `term`, `colors`, `keys`, `os` (os.pullEvent, os.sleep, os.startTimer, os.epoch), `peripheral` (peripheral.find("monitor") etc.), `http` (if enabled), `textutils`, `settings`, `parallel`, `rednet`, `gps`, `redstone`, `window`, `turtle` (turtles only), `pocket` (pocket computers only). `require` loads modules relative to the running program's directory and from /rom/modules (e.g. `require("cc.strings")`).
+- Programs are run by typing their path plus arguments (e.g. `hello` or `mine 3`); the `.lua` extension is optional. Arguments arrive as `...`.
+- A program that runs ~7 seconds without yielding is killed with "Too long without yielding": in long loops call `os.sleep(0)` or pull an event. Turtle movement and sleep already yield.
+- Screen: this is a ]] .. machine .. [[ with a ]] .. w .. "x" .. h .. [[ character screen (]] .. (term.isColour() and "16 colours" or "greyscale only") .. [[). Colours are `colors.*` constants.
+- No package manager: extra code only via `wget <url> <file>` or `pastebin get <code> <file>`. Do not assume LuaRocks, io.popen or os.execute.
+- Current directory: ]] .. pwd)
 
   -- Add working directory contents summary if available
-  local pwd = agent.state.workingDirectory or shell.getWorkingDirectory() or "/home"
-  if fs.exists(pwd) and fs.isDirectory(pwd) then
+  if fs.exists(pwd) and fs.isDir(pwd) then
     local entries = {}
-    for entry in fs.list(pwd) do
+    for _, entry in ipairs(fs.list(pwd)) do
       table.insert(entries, entry)
       if #entries >= 20 then
         table.insert(entries, "...")
@@ -64,14 +78,14 @@ You help the user write, debug, and run Lua programs on this in-game computer by
 ## Tools
 You have: read_file, write_file, edit_file, list_directory, glob, grep, shell.
 - read_file before edit_file; edit_file (exact string match) for existing files, write_file only for new files or full rewrites
-- Find files with glob and search content with grep instead of shell ls/cat chains
-- shell runs OpenOS commands (ls, cat, cp, mv, rm, mkdir, lua ...); stdout capture is limited, so prefer the file tools when one fits
-- Verify your work: after writing a program, run it with `lua <file>` via shell and check the output; fix errors before declaring done
+- Find files with glob and search content with grep instead of chains of shell ls calls
+- shell runs CraftOS commands (ls, cp, mv, rm, mkdir, or a program path) and captures what they print; there is no cat/echo/grep, so prefer the file tools when one fits
+- Verify your work: after writing a program, run it by its path via shell and check the output; fix errors before declaring done. Never run interactive programs (edit, lua, paint) or ones that wait for user input
 
 ## Writing Lua for this system
 - Match repo style: 2-space indent, double quotes, `local` everything, modules return a table
-- Wrap risky calls in pcall (JSON decode, component access, network); use error("message") for failures
-- Check a component exists (component.isAvailable) before using it
+- Wrap risky calls in pcall (JSON decode, peripheral calls, network); use error("message") for failures
+- Check a peripheral exists (peripheral.find / peripheral.isPresent) before using it
 - Keep memory small: stream or process line-by-line, avoid building large strings/tables
 
 ## Interaction
@@ -92,19 +106,19 @@ You have: read_file, write_file, edit_file, list_directory, glob, grep, shell.
     table.insert(parts, "\n## Custom Instructions\n" .. agent.config.systemPrompt)
   end
 
-  -- Add project instructions: prefer .oc-code.md (written for this agent);
+  -- Add project instructions: prefer .cc-code.md (written for this agent);
   -- fall back to CLAUDE.md, which may be host-side docs and is capped harder
   local instructionFiles = {
-    { name = ".oc-code.md", cap = 4000 },
+    { name = ".cc-code.md", cap = 4000 },
     { name = "CLAUDE.md", cap = 2000 },
   }
   for _, f in ipairs(instructionFiles) do
-    local path = fs.concat(pwd, f.name)
-    if fs.exists(path) then
-      local handle = io.open(path, "r")
+    local path = cmnPath.join(pwd, f.name)
+    if fs.exists(path) and not fs.isDir(path) then
+      local handle = fs.open(path, "rb")
       if handle then
-        local content = handle:read("*a")
-        handle:close()
+        local content = handle.readAll()
+        handle.close()
         if content and #content > 0 then
           local truncated = #content > f.cap
           table.insert(parts, "\n## Project Instructions (" .. f.name .. ")\n" ..
@@ -136,18 +150,20 @@ function agent.init(config)
     end
   end
 
-  agent.state.workingDirectory = shell.getWorkingDirectory() or "/home"
+  agent.state.workingDirectory = cmnPath.cwd()
   agent.state.messages = {}
   agent.state.context = {}
 
-  -- Load built-in skills
-  local skillsDir = "/usr/lib/oc-code/skills"
-  if fs.exists(skillsDir) then
-    skills.loadFromDirectory(skillsDir)
+  -- Load built-in skills (lib/cc-code/skills next to this module)
+  if moduleDir then
+    local skillsDir = moduleDir .. "/skills"
+    if fs.exists(skillsDir) then
+      skills.loadFromDirectory(skillsDir)
+    end
   end
 
   -- Also try local skills directory
-  local localSkillsDir = fs.concat(agent.state.workingDirectory, ".oc-code/skills")
+  local localSkillsDir = cmnPath.join(agent.state.workingDirectory, ".cc-code/skills")
   if fs.exists(localSkillsDir) then
     skills.loadFromDirectory(localSkillsDir)
   end
@@ -157,8 +173,6 @@ end
 
 -- Check if API key is configured for the model
 local function checkApiKey(model)
-  local os = require("os")
-
   -- Determine provider and required key
   local provider, requiredKey
 
@@ -182,7 +196,7 @@ local function checkApiKey(model)
   end
 
   if requiredKey then
-    local apiKey = os.getenv(requiredKey)
+    local apiKey = aiUtils.getEnv(requiredKey)
     if not apiKey or apiKey == "" then
       return false, requiredKey, provider
     end
@@ -204,31 +218,16 @@ function agent.process(input, callbacks)
       return { type = "error", text = "No command specified" }
     end
 
-    -- Execute shell command using OpenOS shell.execute
-    local tempFile = "/tmp/.oc-code-shell-out"
-    local cmdWithRedirect = command .. " > " .. tempFile .. " 2>&1"
+    -- Execute shell command, capturing what it prints
+    local success, output = capture.run(command)
+    agent.state.workingDirectory = cmnPath.cwd() -- `cd` may have changed it
 
-    local success, reason = shell.execute(cmdWithRedirect)
-
-    local output = ""
-    if fs.exists(tempFile) then
-      local handle = io.open(tempFile, "r")
-      if handle then
-        output = handle:read("*a") or ""
-        handle:close()
-      end
-      fs.remove(tempFile)
+    if output == "" then
+      output = success and "(command executed, no output)" or "(command failed, no output)"
     end
-
-    -- If redirect didn't work, try executing without redirect
-    if output == "" and not success then
-      success, reason = shell.execute(command)
-      output = reason or (success and "Command completed" or "Command failed")
-    end
-
     return {
       type = "direct",
-      text = output ~= "" and output or "(command executed, no output)"
+      text = output
     }
   end
 
@@ -265,14 +264,14 @@ function agent.process(input, callbacks)
   -- Add user message (snapshot first: the tool loop appends tool-call/result
   -- messages to this same table, so error recovery must trim back to here)
   local messageSnapshot = #agent.state.messages
-  table.insert(agent.state.messages, { role = "user", content = input })
+  table.insert(agent.state.messages, { role = "user", content = text.fromCC(input) })
 
   -- Check if API key is configured
   local hasKey, requiredKey, provider = checkApiKey(agent.config.model)
   if not hasKey then
     local errorMsg = string.format(
       "No API key found. Please set your API key:\n\n" ..
-      "1. Set environment variable: %s\n" ..
+      "1. Exit and run: set %s <key>\n" ..
       "2. Or use /model command to switch to a different provider\n\n" ..
       "Current model: %s (requires %s provider)",
       requiredKey,
@@ -345,6 +344,7 @@ function agent.process(input, callbacks)
   success, err = pcall(function()
     result = ai.generateText(opts)
   end)
+  agent.state.workingDirectory = cmnPath.cwd() -- a shell tool call may have run `cd`
 
   -- Handle errors from API calls
   if not success then
@@ -357,18 +357,17 @@ function agent.process(input, callbacks)
     local errorMsg = tostring(err)
 
     -- Check if it's an API key error
-    if errorMsg:match("API key is required") or errorMsg:match("OPENAI_API_KEY") then
-      errorMsg = "No API key found. Please set your API key:\n\n" ..
-                 "Set environment variable: OPENAI_API_KEY\n" ..
-                 "Or use /model command to switch to a different provider"
-    elseif errorMsg:match("GOOGLE_GENERATIVE_AI_API_KEY") then
-      errorMsg = "No API key found. Please set your API key:\n\n" ..
-                 "Set environment variable: GOOGLE_GENERATIVE_AI_API_KEY\n" ..
-                 "Or use /model command to switch to a different provider"
-    elseif errorMsg:match("GROQ_API_KEY") then
-      errorMsg = "No API key found. Please set your API key:\n\n" ..
-                 "Set environment variable: GROQ_API_KEY\n" ..
-                 "Or use /model command to switch to a different provider"
+    if errorMsg == "Terminated" then
+      errorMsg = "Request cancelled (Ctrl+T)."
+    else
+      for _, keyName in ipairs({ "OPENAI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GROQ_API_KEY", "AI_GATEWAY_API_KEY" }) do
+        if errorMsg:match(keyName) then
+          errorMsg = "No API key found. Please set your API key:\n\n" ..
+                     "Exit and run: set " .. keyName .. " <key>\n" ..
+                     "Or use /model command to switch to a different provider"
+          break
+        end
+      end
     end
 
     return {
@@ -404,9 +403,10 @@ end
 
 -- Set working directory
 function agent.setWorkingDirectory(path)
-  if fs.exists(path) and fs.isDirectory(path) then
-    agent.state.workingDirectory = fs.canonical(path)
-    shell.setWorkingDirectory(agent.state.workingDirectory)
+  local resolved = cmnPath.resolve(path)
+  if fs.exists(resolved) and fs.isDir(resolved) then
+    shell.setDir(fs.combine(resolved, ""))
+    agent.state.workingDirectory = resolved
     return true
   end
   return false

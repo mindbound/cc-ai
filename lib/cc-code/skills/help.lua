@@ -1,7 +1,7 @@
--- oc-code/skills/help.lua
+-- cc-code/skills/help.lua
 -- Help skill - shows available commands and usage
 
-local skills = require("oc-code.skills")
+local skills = require("cc-code.skills")
 
 return skills.create({
   name = "help",
@@ -14,7 +14,7 @@ return skills.create({
       (currentModel.provider .. ":" .. currentModel.modelId)
 
     local lines = {
-      "oc-code - AI Coding Agent for OpenComputers",
+      "cc-code - AI Coding Agent for ComputerCraft",
       "",
       "Current model: " .. modelStr,
       "",
@@ -25,18 +25,19 @@ return skills.create({
       "    /model <provider/model>   - Use gateway model",
       "    /model google <model>     - Use Google directly",
       "    /model openai <model>     - Use OpenAI directly",
-      "  /robot <prompt> - Ask robot programming question with context",
-      "    /robot write a mining script     - Quick reference",
-      "    /robot full <prompt>             - Use full API docs",
+      "    /model groq <model>       - Use Groq directly",
+      "  /turtle <prompt> - Ask turtle programming question with context",
+      "    /turtle write a mining script    - Quick reference",
+      "    /turtle full <prompt>            - Use full API docs",
       "  /clear          - Clear conversation history",
-      "  /exit, /quit    - Exit oc-code",
+      "  /exit, /quit    - Exit cc-code",
       "",
       "Shell Commands:",
       "  !<command>      - Execute shell command directly",
       "    Examples:",
       "      !ls         - List files in current directory",
-      "      !pwd        - Print working directory",
-      "      !df -h      - Check disk space",
+      "      !cd disk    - Change directory",
+      "      !id         - Show computer ID and label",
       "",
       "Tools:",
       "  read_file, write_file, edit_file, list_directory,",
@@ -44,8 +45,9 @@ return skills.create({
       "",
       "Tips:",
       "  - Type naturally to ask for help with code",
-      "  - Use PageUp/PageDown to scroll",
-      "  - Use Ctrl+C to cancel",
+      "  - Use PageUp/PageDown or the mouse wheel to scroll",
+      "  - Hold Ctrl+T to cancel a request, or to exit at the prompt",
+      "  - API keys: exit, then run: set <KEY_NAME> <key>",
     }
     -- Return nil to prevent sending to AI, handle directly
     return nil, table.concat(lines, "\n")

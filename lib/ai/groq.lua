@@ -4,7 +4,7 @@ local createGroq = compat.createProvider({
   baseURL = "https://api.groq.com/openai/v1",
   name = "groq",
   envVar = "GROQ_API_KEY",
-  apiKeyError = "Set GROQ_API_KEY environment variable or pass apiKey to createGroq().",
+  apiKeyError = "Run: set GROQ_API_KEY <key>, or pass apiKey to createGroq().",
 })
 
 local groq = setmetatable({

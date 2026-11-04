@@ -1,0 +1,126 @@
+-- tests/test_agent.lua
+-- cc-code agent: skills, commands, shell bypass and a full tool-using turn
+
+return function(T)
+  local agent = require("cc-code.agent")
+  local skills = require("cc-code.skills")
+  local occode = require("cc-code")
+  local mock = T.http
+
+  settings.set("AI_GATEWAY_API_KEY", "gw-test")
+
+  local function chat(content, toolCalls)
+    return { choices = { { message = { role = "assistant", content = content, tool_calls = toolCalls }, finish_reason = toolCalls and "tool_calls" or "stop" } } }
+  end
+
+  agent.init({ model = "anthropic/claude-sonnet-4" })
+
+  T.test("built-in skills are loaded from lib/cc-code/skills", function()
+    T.ok(skills.get("help"), "help skill")
+    T.ok(skills.get("model"), "model skill")
+    T.ok(skills.get("turtle"), "turtle skill")
+    T.eq(skills.findByCommand("/turtle").name, "turtle")
+  end)
+
+  T.test("/help is answered locally", function()
+    local r = agent.process("/help")
+    T.eq(r.type, "direct")
+    T.contains(r.text, "cc-code - AI Coding Agent for ComputerCraft")
+  end)
+
+  T.test("/model switches between gateway and direct providers", function()
+    local r = agent.process("/model google gemini-2.5-flash")
+    T.contains(r.text, "Switched to google")
+    T.eq(agent.config.model.provider, "google")
+    r = agent.process("/model openai/gpt-4o-mini")
+    T.eq(agent.config.model, "openai/gpt-4o-mini")
+    r = agent.process("/model")
+    T.contains(r.text, "Current model: openai/gpt-4o-mini")
+  end)
+
+  T.test("/turtle on a computer builds a prompt with the quick reference", function()
+    local skill = skills.get("turtle")
+    local prompt = skill.onActivate(agent, "dig a tunnel")
+    T.contains(prompt, "turtle.getFuelLevel")
+    T.contains(prompt, "My question: dig a tunnel")
+    local _, direct = skill.onActivate(agent, "")
+    T.contains(direct, "Quick reference loaded")
+  end)
+
+  T.test("/turtle full loads docs/turtle.md", function()
+    local prompt = skills.get("turtle").onActivate(agent, "full how do I refuel")
+    T.contains(prompt, "# Turtle API")
+    T.contains(prompt, "My question: how do I refuel")
+  end)
+
+  T.test("!command runs in the shell and returns its output", function()
+    local r = agent.process("!id")
+    T.eq(r.type, "direct")
+    T.contains(r.text, "computer")
+  end)
+
+  T.test("/clear and /exit are commands", function()
+    T.eq(agent.process("/clear").command, "clear")
+    T.eq(agent.process("/exit").command, "exit")
+  end)
+
+  T.test("missing API key returns setup instructions", function()
+    settings.unset("AI_GATEWAY_API_KEY")
+    local r = agent.process("hello")
+    T.eq(r.type, "error")
+    T.contains(r.text, "set AI_GATEWAY_API_KEY <key>")
+    T.eq(#agent.getHistory(), 0)
+    settings.set("AI_GATEWAY_API_KEY", "gw-test")
+  end)
+
+  T.test("a full turn: model lists a directory via a tool, then answers", function()
+    mock.reset()
+    agent.clearHistory()
+    T.resetTmp()
+    T.writeFile(T.tmp .. "/one.lua", "x")
+    mock.push({ body = chat(nil, { { id = "c1", type = "function", ["function"] = { name = "list_directory", arguments = "{\"path\":\"" .. T.tmp .. "\"}" } } }) })
+    mock.push({ body = chat("There is one file: one.lua") })
+    local calls, results = {}, {}
+    local r = agent.process("what files are here? caf\233", {
+      onToolCall = function(name, args) table.insert(calls, name .. ":" .. args.path) end,
+      onToolResult = function(name, res) table.insert(results, res) end,
+    })
+    T.eq(r.type, "response")
+    T.eq(r.text, "There is one file: one.lua")
+    T.eq(calls[1], "list_directory:" .. T.tmp)
+    T.eq(results[1].entries[1].name, "one.lua")
+    -- History keeps the tool exchange: user, assistant tool call, tool result, answer
+    local history = agent.getHistory()
+    T.eq(#history, 4)
+    T.eq(history[1].content, "what files are here? caf\195\169", "user input converted to UTF-8")
+    T.eq(history[3].role, "tool")
+    T.eq(history[4].content, "There is one file: one.lua")
+    local sys = mock.requests[1].json.messages[1].content
+    T.contains(sys, "ComputerCraft: Tweaked")
+    T.contains(sys, "Current directory: /")
+    T.eq(#mock.requests[1].json.tools, 7)
+  end)
+
+  T.test("API failures roll back the turn and report the error", function()
+    mock.reset()
+    agent.clearHistory()
+    mock.push({ code = 429, body = { error = { message = "Rate limited" } } })
+    local r = agent.process("hi")
+    T.eq(r.type, "error")
+    T.contains(r.text, "Rate limited")
+    T.eq(#agent.getHistory(), 0)
+  end)
+
+  T.test("occode.exec runs a one-shot prompt", function()
+    mock.reset()
+    mock.push({ body = chat("done") })
+    local textOut = occode.exec("say done")
+    T.eq(textOut, "done")
+  end)
+
+  T.test("UI selection follows the terminal", function()
+    T.eq(occode.needsMonochrome(), not term.isColour())
+    T.ok(occode.hasTuiSupport())
+    T.eq(occode.getUI(true), require("cc-code.terminal"))
+  end)
+end

@@ -70,7 +70,7 @@ local function createLanguageModel(modelId, config)
   function model.doGenerate(opts)
     local apiKey = config.getApiKey()
     if not apiKey or apiKey == "" then
-      error("API key is required. " .. config.apiKeyError)
+      error("API key is required. " .. config.apiKeyError, 0)
     end
 
     local url = config.baseURL .. "/chat/completions"
@@ -151,7 +151,7 @@ local function createLanguageModel(modelId, config)
   function model.doStream(opts, onChunk)
     local apiKey = config.getApiKey()
     if not apiKey or apiKey == "" then
-      error("API key is required. " .. config.apiKeyError)
+      error("API key is required. " .. config.apiKeyError, 0)
     end
 
     local url = config.baseURL .. "/chat/completions"
@@ -264,13 +264,14 @@ local function createLanguageModel(modelId, config)
 end
 
 local function createProvider(defaults)
+  utils.defineSetting(defaults.envVar, "API key for the " .. defaults.name .. " provider (cc-ai)")
   return function(options)
     options = options or {}
     local baseURL = options.baseURL or defaults.baseURL
     local providerName = options.name or defaults.name
 
     local function getApiKey()
-      return options.apiKey or os.getenv(defaults.envVar)
+      return options.apiKey or utils.getEnv(defaults.envVar)
     end
 
     local function getHeaders()

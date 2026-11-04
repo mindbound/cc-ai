@@ -1,6 +1,7 @@
 -- runAll.lua: Run all demo scripts (excluding interactive ones)
 
-local demoDir = "./"
+-- Demos live next to this script
+local demoDir = "/" .. fs.getDir(shell.getRunningProgram())
 
 local demos = {
   -- Main demos
@@ -31,20 +32,24 @@ local passed = 0
 local failed = 0
 local errors = {}
 
-print("=" .. string.rep("=", 59))
+print(string.rep("=", 26))
 print("Running all demos")
-print("=" .. string.rep("=", 59))
+print(string.rep("=", 26))
 print("")
 
 for _, demo in ipairs(demos) do
-  local path = demoDir .. "/" .. demo
-  print("-" .. string.rep("-", 59))
+  local path = fs.combine(demoDir, demo)
+  print(string.rep("-", 26))
   print("Running: " .. demo)
-  print("-" .. string.rep("-", 59))
+  print(string.rep("-", 26))
 
-  local ok, err = pcall(function()
-    dofile(path)
-  end)
+  -- shell.run gives each demo its own environment with `require`
+  -- (dofile would run it in _G, which has none). Errors are printed by the
+  -- shell and reported as a false return value.
+  local ok, err = pcall(shell.run, "/" .. path)
+  if ok and not err then
+    ok, err = false, "demo exited with an error (see output above)"
+  end
 
   print("")
 
@@ -61,9 +66,9 @@ for _, demo in ipairs(demos) do
   print("")
 end
 
-print("=" .. string.rep("=", 59))
+print(string.rep("=", 26))
 print("Summary: " .. passed .. " passed, " .. failed .. " failed")
-print("=" .. string.rep("=", 59))
+print(string.rep("=", 26))
 
 if #errors > 0 then
   print("")

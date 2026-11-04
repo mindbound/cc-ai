@@ -4,7 +4,7 @@ local createVercel = compat.createProvider({
   baseURL = "https://ai-gateway.vercel.sh/v1",
   name = "vercel",
   envVar = "AI_GATEWAY_API_KEY",
-  apiKeyError = "Set AI_GATEWAY_API_KEY environment variable or pass apiKey to createVercel().",
+  apiKeyError = "Run: set AI_GATEWAY_API_KEY <key>, or pass apiKey to createVercel().",
 })
 
 local vercel = setmetatable({

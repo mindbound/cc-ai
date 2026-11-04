@@ -1,6 +1,7 @@
 -- cmn-utils/init.lua
--- Common utilities for OpenOS
--- Provides glob (file pattern matching), grep (content search), and json
+-- Common utilities for CraftOS
+-- Provides glob (file pattern matching), grep (content search), json,
+-- text (UTF-8 <-> CC charset) and path helpers
 
 local cmnUtils = {}
 
@@ -26,6 +27,14 @@ function cmnUtils.json()
     json = require("cmn-utils.json")
   end
   return json
+end
+
+function cmnUtils.text()
+  return require("cmn-utils.text")
+end
+
+function cmnUtils.path()
+  return require("cmn-utils.path")
 end
 
 -- Convenience shortcuts for common operations

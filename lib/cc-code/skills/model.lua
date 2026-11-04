@@ -1,7 +1,7 @@
--- oc-code/skills/model.lua
+-- cc-code/skills/model.lua
 -- Model selection skill - switch between AI providers and models
 
-local skills = require("oc-code.skills")
+local skills = require("cc-code.skills")
 
 -- Available providers and their popular models
 local providers = {
@@ -112,7 +112,7 @@ local function getCompletions(args)
 end
 
 -- Register completion handler with TUI (if available)
-local ok, tui = pcall(require, "oc-code.tui")
+local ok, tui = pcall(require, "cc-code.tui")
 if ok and tui.registerCompletion then
   tui.registerCompletion("/model", getCompletions, "Models")
 end

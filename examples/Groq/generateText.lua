@@ -1,3 +1,6 @@
+-- Make the cc-ai libraries in ../../lib requireable
+package.path = "../../lib/?.lua;../../lib/?/init.lua;" .. package.path
+
 local ai = require("ai")
 local groq = require("ai.groq")
 

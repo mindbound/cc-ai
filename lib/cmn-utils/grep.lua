@@ -1,26 +1,35 @@
 -- cmn-utils/grep.lua
--- File content search utility for OpenOS
+-- File content search utility for CraftOS
 
-local fs = require("filesystem")
-local shell = require("shell")
+local path = require("cmn-utils.path")
 local cmnGlob = require("cmn-utils.glob")
 
 local grep = {}
 
--- Resolve path relative to working directory
-local function resolvePath(path)
-  if not path or path == "" then
-    return shell.getWorkingDirectory()
-  end
-  if path:sub(1, 1) == "/" then
-    return fs.canonical(path)
-  end
-  return fs.canonical(fs.concat(shell.getWorkingDirectory(), path))
-end
-
 -- Escape special pattern characters for literal search
 local function escapeLiteral(str)
-  return str:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+  return (str:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1"))
+end
+
+-- Iterate over the lines of a file (raw bytes, CR stripped)
+local function fileLines(filePath)
+  local handle = fs.open(filePath, "rb")
+  if not handle then return nil end
+  return function()
+    if not handle then return nil end
+    local line = handle.readLine()
+    if line == nil then
+      handle.close()
+      handle = nil
+      return nil
+    end
+    return (line:gsub("\r$", ""))
+  end, function()
+    if handle then
+      handle.close()
+      handle = nil
+    end
+  end
 end
 
 -- Search for pattern in files
@@ -34,21 +43,29 @@ end
 -- @return table: { pattern, results = {...}, truncated = bool }
 function grep.search(pattern, opts)
   opts = opts or {}
-  local basePath = resolvePath(opts.path or ".")
+  local basePath = path.resolve(opts.path or ".")
   local maxResults = opts.maxResults or 50
   local maxLineLength = opts.maxLineLength or 200
   local results = {}
+  local fromRoot = basePath == "/"
 
   if opts.literal then
     pattern = escapeLiteral(pattern)
   end
 
+  -- Validate the pattern once so a bad one gives a clear error
+  local ok, err = pcall(string.find, "", pattern)
+  if not ok then
+    return { error = "Invalid Lua pattern: " .. tostring(err) }
+  end
+
   local function searchFile(filePath, relPath)
-    local handle = io.open(filePath, "r")
-    if not handle then return end
+    local nextLine, close = fileLines(filePath)
+    if not nextLine then return end
     local lineNum = 0
-    for line in handle:lines() do
+    for line in nextLine do
       lineNum = lineNum + 1
+      if lineNum % 200 == 0 then path.maybeYield() end
       if line:find(pattern) then
         table.insert(results, {
           file = relPath,
@@ -56,27 +73,29 @@ function grep.search(pattern, opts)
           content = line:sub(1, maxLineLength),
         })
         if #results >= maxResults then
-          handle:close()
+          close()
           return true
         end
       end
     end
-    handle:close()
   end
 
   local function walk(dir, prefix)
-    if not fs.isDirectory(dir) then
+    if not fs.isDir(dir) then
       -- Single file
-      if cmnGlob.match(fs.name(dir), opts.glob) then
+      if cmnGlob.match(fs.getName(dir), opts.glob) then
         searchFile(dir, prefix)
       end
       return
     end
-    for entry in fs.list(dir) do
-      local fullPath = fs.concat(dir, entry)
+    for _, entry in ipairs(fs.list(dir)) do
+      path.maybeYield()
+      local fullPath = path.join(dir, entry)
       local relPath = prefix == "" and entry or (prefix .. "/" .. entry)
-      if fs.isDirectory(fullPath) then
-        walk(fullPath, relPath)
+      if fs.isDir(fullPath) then
+        if not (fromRoot and prefix == "" and path.rootSkip[entry]) then
+          walk(fullPath, relPath)
+        end
       else
         if cmnGlob.match(entry, opts.glob) then
           if searchFile(fullPath, relPath) then
@@ -88,7 +107,10 @@ function grep.search(pattern, opts)
     end
   end
 
-  walk(basePath, fs.isDirectory(basePath) and "" or fs.name(basePath))
+  if not fs.exists(basePath) then
+    return { error = "Path not found: " .. basePath }
+  end
+  walk(basePath, fs.isDir(basePath) and "" or fs.getName(basePath))
   return {
     pattern = opts.literal and ("literal: " .. pattern) or pattern,
     results = results,
@@ -103,7 +125,7 @@ end
 -- @return table: Array of { line, content } matches
 function grep.searchFile(pattern, filePath, opts)
   opts = opts or {}
-  local path = resolvePath(filePath)
+  local filePathAbs = path.resolve(filePath)
   local maxResults = opts.maxResults or 50
   local maxLineLength = opts.maxLineLength or 200
   local results = {}
@@ -112,13 +134,13 @@ function grep.searchFile(pattern, filePath, opts)
     pattern = escapeLiteral(pattern)
   end
 
-  local handle = io.open(path, "r")
-  if not handle then
-    return nil, "Cannot open file: " .. path
+  local nextLine, close = fileLines(filePathAbs)
+  if not nextLine then
+    return nil, "Cannot open file: " .. filePathAbs
   end
 
   local lineNum = 0
-  for line in handle:lines() do
+  for line in nextLine do
     lineNum = lineNum + 1
     if line:find(pattern) then
       table.insert(results, {
@@ -130,7 +152,7 @@ function grep.searchFile(pattern, filePath, opts)
       end
     end
   end
-  handle:close()
+  close()
   return results
 end
 

@@ -1,23 +1,33 @@
--- oc-code/tools.lua
--- Core tools for the oc-code agent (OpenOS compatible)
+-- cc-code/tools.lua
+-- Core tools for the cc-code agent (CraftOS compatible)
 
 local ai = require("ai")
-local fs = require("filesystem")
-local shell = require("shell")
 local cmnGlob = require("cmn-utils.glob")
 local cmnGrep = require("cmn-utils.grep")
+local cmnPath = require("cmn-utils.path")
+local capture = require("cc-code.capture")
 
 local tools = {}
 
 -- Helper: resolve path relative to working directory
-local function resolvePath(path)
-  if not path or path == "" then
-    return shell.getWorkingDirectory()
-  end
-  if path:sub(1, 1) == "/" then
-    return fs.canonical(path)
-  end
-  return fs.canonical(fs.concat(shell.getWorkingDirectory(), path))
+local resolvePath = cmnPath.resolve
+
+-- Helper: read a whole file as raw bytes (nil if it can't be opened)
+local function readFile(path)
+  local handle = fs.open(path, "rb")
+  if not handle then return nil end
+  local content = handle.readAll() or ""
+  handle.close()
+  return content
+end
+
+-- Helper: write a whole file as raw bytes
+local function writeFile(path, content)
+  local handle, err = fs.open(path, "wb")
+  if not handle then return false, err end
+  handle.write(content)
+  handle.close()
+  return true
 end
 
 -- Helper: read file with line numbers
@@ -63,15 +73,14 @@ tools.read_file = ai.tool({
     if not fs.exists(path) then
       return { error = "File not found: " .. path }
     end
-    if fs.isDirectory(path) then
+    if fs.isDir(path) then
       return { error = "Path is a directory: " .. path }
     end
-    local handle = io.open(path, "r")
-    if not handle then
+    local content = readFile(path)
+    if not content then
       return { error = "Cannot open file: " .. path }
     end
-    local content = handle:read("*a")
-    handle:close()
+    content = content:gsub("\r\n", "\n")
     local offset = args.offset or 1
     local limit = args.limit
     return {
@@ -96,17 +105,18 @@ tools.write_file = ai.tool({
   },
   execute = function(args)
     local path = resolvePath(args.path)
+    if fs.isReadOnly(path) then
+      return { error = "Path is read-only: " .. path }
+    end
     -- Ensure parent directory exists
-    local dir = fs.path(path)
-    if dir and dir ~= "" and not fs.exists(dir) then
-      fs.makeDirectory(dir)
+    local dir = fs.getDir(path)
+    if dir ~= "" and dir ~= ".." and not fs.exists(dir) then
+      fs.makeDir(dir)
     end
-    local handle = io.open(path, "w")
-    if not handle then
-      return { error = "Cannot write to file: " .. path }
+    local ok, err = writeFile(path, args.content)
+    if not ok then
+      return { error = "Cannot write to file: " .. path .. (err and (" (" .. err .. ")") or "") }
     end
-    handle:write(args.content)
-    handle:close()
     return { success = true, path = path, bytesWritten = #args.content }
   end,
 })
@@ -130,12 +140,13 @@ tools.edit_file = ai.tool({
     if not fs.exists(path) then
       return { error = "File not found: " .. path }
     end
-    local handle = io.open(path, "r")
-    if not handle then
+    if fs.isDir(path) then
+      return { error = "Path is a directory: " .. path }
+    end
+    local content = readFile(path)
+    if not content then
       return { error = "Cannot open file: " .. path }
     end
-    local content = handle:read("*a")
-    handle:close()
 
     -- Count occurrences
     local count = 0
@@ -157,21 +168,21 @@ tools.edit_file = ai.tool({
     local newContent
     if args.replace_all then
       -- Escape magic chars in pattern and % in replacement so both are literal
+      -- (parentheses keep only gsub's first result: the count would
+      -- otherwise become content:gsub's "max replacements" argument)
       newContent = content:gsub(
-        args.old_string:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1"),
-        args.new_string:gsub("%%", "%%%%")
+        (args.old_string:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")),
+        (args.new_string:gsub("%%", "%%%%"))
       )
     else
       local idx = content:find(args.old_string, 1, true)
       newContent = content:sub(1, idx - 1) .. args.new_string .. content:sub(idx + #args.old_string)
     end
 
-    handle = io.open(path, "w")
-    if not handle then
-      return { error = "Cannot write to file: " .. path }
+    local ok, err = writeFile(path, newContent)
+    if not ok then
+      return { error = "Cannot write to file: " .. path .. (err and (" (" .. err .. ")") or "") }
     end
-    handle:write(newContent)
-    handle:close()
     return { success = true, path = path, replacements = args.replace_all and count or 1 }
   end,
 })
@@ -192,16 +203,16 @@ tools.list_directory = ai.tool({
     if not fs.exists(path) then
       return { error = "Path not found: " .. path }
     end
-    if not fs.isDirectory(path) then
+    if not fs.isDir(path) then
       return { error = "Path is not a directory: " .. path }
     end
     local entries = {}
-    for entry in fs.list(path) do
-      local fullPath = fs.concat(path, entry)
-      local isDir = fs.isDirectory(fullPath)
+    for _, entry in ipairs(fs.list(path)) do
+      local fullPath = cmnPath.join(path, entry)
+      local isDir = fs.isDir(fullPath)
       local size = 0
       if not isDir then
-        size = fs.size(fullPath) or 0
+        size = fs.getSize(fullPath) or 0
       end
       table.insert(entries, {
         name = entry,
@@ -261,10 +272,14 @@ tools.grep = ai.tool({
   end,
 })
 
--- Tool: Shell (execute OpenOS shell command)
+-- Tool: Shell (execute CraftOS shell command)
 tools.shell = ai.tool({
   name = "shell",
-  description = "Execute an OpenOS shell command. Available commands: ls, cat, cp, mv, rm, mkdir, cd, pwd, echo, lua. Note: stdout capture is limited in OpenOS.",
+  description = "Execute a CraftOS shell command and capture what it prints. " ..
+    "Programs: ls, cd, cp, mv, rm, mkdir, type, id, label, set, wget, pastebin, gps, peripherals. " ..
+    "Run a Lua program by its path, with arguments (e.g. 'hello.lua' or 'mine 3'); there is no 'lua <file>' command. " ..
+    "There is no cat, echo or grep: use read_file, write_file and grep. " ..
+    "Never run interactive programs (edit, lua, shell, paint) or programs that wait for input: the agent blocks until they exit.",
   parameters = {
     type = "object",
     properties = {
@@ -275,38 +290,9 @@ tools.shell = ai.tool({
   },
   execute = function(args)
     local workdir = args.workdir and resolvePath(args.workdir) or nil
-    local oldPwd = shell.getWorkingDirectory()
-
-    if workdir and fs.isDirectory(workdir) then
-      shell.setWorkingDirectory(workdir)
-    end
-
-    -- Try to capture output by redirecting to temp file
-    local tempFile = "/tmp/.oc-code-out"
-    local cmdWithRedirect = args.command .. " > " .. tempFile .. " 2>&1"
-
-    -- Use shell.execute for OpenOS
-    local success, reason = shell.execute(cmdWithRedirect)
-
-    local output = ""
-    if fs.exists(tempFile) then
-      local handle = io.open(tempFile, "r")
-      if handle then
-        output = handle:read("*a") or ""
-        handle:close()
-      end
-      fs.remove(tempFile)
-    end
-
-    -- Restore working directory
-    if workdir and oldPwd then
-      shell.setWorkingDirectory(oldPwd)
-    end
-
-    -- If redirect didn't work, try executing without redirect
-    if output == "" and not success then
-      success, reason = shell.execute(args.command)
-      output = reason or (success and "Command completed" or "Command failed")
+    local success, output = capture.run(args.command, workdir)
+    if output == "" then
+      output = success and "(no output)" or "(command failed, no output)"
     end
 
     return {

@@ -1,10 +1,13 @@
+-- Make the cc-ai libraries in ../lib requireable
+package.path = "../lib/?.lua;../lib/?/init.lua;" .. package.path
+
 local ai = require("ai")
 local vercel = require("ai.vercel")
 
 -- Create a Vercel provider instance with an explicit API key
--- This is useful when you want to use a different API key than the one in the environment
+-- This is useful when you want to use a different API key than the one in settings
 local provider = vercel.createVercel({
-  apiKey = os.getenv("AI_GATEWAY_API_KEY"),  -- or pass a string directly: "your-api-key-here"
+  apiKey = settings.get("AI_GATEWAY_API_KEY"),  -- or pass a string directly: "your-api-key-here"
   -- Optional: customize the base URL
   -- baseURL = "https://ai-gateway.vercel.sh/v1",
   -- Optional: add custom headers

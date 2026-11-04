@@ -1,21 +1,116 @@
-local internet = require("internet")
-
 local utils = {}
 
-function utils.httpPost(url, headers, body)
-  local response = ""
-  local request = internet.request(url, body, headers)
-  for chunk in request do
-    response = response .. chunk
-  end
-  return response
+-- Seconds to wait for an HTTP response. Model calls with tools can take a
+-- while; override with: set ai.http_timeout <seconds>
+local DEFAULT_TIMEOUT = 120
+
+local function getTimeout()
+  local value = settings and settings.get("ai.http_timeout")
+  return tonumber(value) or DEFAULT_TIMEOUT
 end
 
+-- Read a configuration value (API keys etc.).
+-- CC: Tweaked has no environment variables, so values live in the settings
+-- API (persisted in /.settings): set GOOGLE_GENERATIVE_AI_API_KEY <key>
+function utils.getEnv(name)
+  if settings then
+    local value = settings.get(name)
+    if value ~= nil and value ~= "" then
+      return tostring(value)
+    end
+  end
+  if os.getenv then
+    local value = os.getenv(name)
+    if value ~= nil and value ~= "" then
+      return value
+    end
+  end
+  return nil
+end
+
+-- Register a setting so the `set` program can show its description
+function utils.defineSetting(name, description)
+  if settings and settings.define then
+    pcall(settings.define, name, { description = description, type = "string" })
+  end
+end
+
+-- POST and return the response handle plus the status code.
+-- Non-2xx responses still return their handle (the body usually holds the
+-- API's JSON error); only transport failures raise.
+local function post(url, headers, body)
+  if not http then
+    error("HTTP API is disabled. Enable http in the ComputerCraft config.")
+  end
+  local response, err, errResponse = http.post({
+    url = url,
+    body = body,
+    headers = headers,
+    timeout = getTimeout(),
+  })
+  if response then
+    return response, response.getResponseCode()
+  end
+  if errResponse then
+    return errResponse, errResponse.getResponseCode(), err
+  end
+  local host = url:match("^%w+://([^/]+)") or url
+  error("HTTP request to " .. host .. " failed: " .. tostring(err), 0)
+end
+
+-- Turn an error response body into a readable message
+local function describeError(code, reason, bodyText)
+  local json = require("cmn-utils.json")
+  local ok, data = pcall(json.decode, bodyText or "")
+  if ok and type(data) == "table" and data.error then
+    local e = data.error
+    if type(e) == "table" then
+      return e.message or json.encode(e)
+    end
+    return tostring(e)
+  end
+  local msg = "HTTP " .. tostring(code) .. " " .. tostring(reason or "")
+  if bodyText and bodyText ~= "" then
+    msg = msg .. ": " .. bodyText:sub(1, 300)
+  end
+  return msg
+end
+
+-- POST and return the full response body as a string
+function utils.httpPost(url, headers, body)
+  local handle, code, reason = post(url, headers, body)
+  local text = handle.readAll() or ""
+  handle.close()
+  if code >= 400 then
+    error(describeError(code, reason, text), 0)
+  end
+  return text
+end
+
+-- POST and return an iterator over the response body, one line at a time
+-- (each line keeps its trailing "\n").
+-- Note: CC: Tweaked downloads the whole response before http.post returns,
+-- so chunks are delivered all at once when the response completes.
 function utils.httpPostStream(url, headers, body)
-  return internet.request(url, body, headers)
+  local handle, code, reason = post(url, headers, body)
+  if code >= 400 then
+    local text = handle.readAll() or ""
+    handle.close()
+    error(describeError(code, reason, text), 0)
+  end
+  return function()
+    if not handle then return nil end
+    local line = handle.readLine(true)
+    if line == nil then
+      handle.close()
+      handle = nil
+    end
+    return line
+  end
 end
 
 function utils.parseSSELine(line)
+  line = line:gsub("\r$", "")
   if line:sub(1, 6) == "data: " then
     local data = line:sub(7)
     if data == "[DONE]" then

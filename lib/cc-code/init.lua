@@ -1,10 +1,9 @@
--- oc-code/init.lua
--- Main module for oc-code: A Claude-like coding agent for OpenComputers
+-- cc-code/init.lua
+-- Main module for cc-code: A Claude-like coding agent for ComputerCraft
 
-local agent = require("oc-code.agent")
-local tools = require("oc-code.tools")
-local skills = require("oc-code.skills")
-local component = require("component")
+local agent = require("cc-code.agent")
+local tools = require("cc-code.tools")
+local skills = require("cc-code.skills")
 
 local occode = {}
 
@@ -16,37 +15,31 @@ occode.skills = skills
 -- Version
 occode.version = "0.2.0"
 
--- Detect if we have TUI support (GPU + screen)
+-- Detect if we have TUI support. Every CC computer, turtle and pocket
+-- computer has a terminal; the TUI just needs one at least this big.
 function occode.hasTuiSupport()
-  local hasGpu = component.isAvailable("gpu")
-  local hasScreen = component.isAvailable("screen")
-  -- TUI now supports both color and monochrome (1-bit) displays
-  return hasGpu and hasScreen
+  local w, h = term.getSize()
+  return w >= 20 and h >= 8
 end
 
--- Check if monochrome mode is needed (1-bit display)
+-- Check if monochrome mode is needed (non-advanced computers are greyscale)
 function occode.needsMonochrome()
-  if component.isAvailable("gpu") then
-    local gpu = component.gpu
-    return gpu.getDepth() == 1
-  end
-  return false
+  return not term.isColour()
 end
 
 -- Get the appropriate UI module
--- Note: Robots have tier 1 GPU (1-bit), so they use TUI with monochrome colors
 function occode.getUI(forceTerminal)
   if forceTerminal or not occode.hasTuiSupport() then
-    return require("oc-code.terminal")
+    return require("cc-code.terminal")
   else
-    return require("oc-code.tui")
+    return require("cc-code.tui")
   end
 end
 
 -- Lazy load tui for backward compatibility
 occode.tui = setmetatable({}, {
   __index = function(_, key)
-    local tui = require("oc-code.tui")
+    local tui = require("cc-code.tui")
     return tui[key]
   end
 })
@@ -54,7 +47,7 @@ occode.tui = setmetatable({}, {
 -- Lazy load terminal
 occode.terminal = setmetatable({}, {
   __index = function(_, key)
-    local terminal = require("oc-code.terminal")
+    local terminal = require("cc-code.terminal")
     return terminal[key]
   end
 })
@@ -66,7 +59,7 @@ local function runLoop(ui, config)
 
   -- Initialize UI
   ui.init(config)
-  ui.print("Welcome to oc-code v" .. occode.version, ui.colors and ui.colors.assistant)
+  ui.print("Welcome to cc-code v" .. occode.version, ui.colors and ui.colors.assistant)
   ui.print("Type /help for available commands.", ui.colors and ui.colors.dim)
   ui.print("Use !<command> to execute shell commands (e.g., !ls)", ui.colors and ui.colors.dim)
   ui.print("", ui.colors and ui.colors.foreground)
@@ -75,22 +68,11 @@ local function runLoop(ui, config)
   while ui.isRunning() do
     ui.setStatus("Ready")
 
-    -- Use simple input for terminal mode if event-based fails
-    local input
-    if ui.readInputSimple then
-      -- Terminal mode - try event-based first, fallback to simple
-      local ok
-      ok, input = pcall(ui.readInput)
-      if not ok then
-        input = ui.readInputSimple()
-      end
-    else
-      input = ui.readInput()
-    end
+    local input = ui.readInput()
 
     if input == nil then
-      -- Ctrl+C pressed
-      ui.print("^C", ui.colors and ui.colors.dim)
+      -- Ctrl+T at an empty prompt: exit, like other CraftOS programs
+      ui.stop()
     elseif input == "" then
       -- Empty input, do nothing
     else
@@ -137,6 +119,15 @@ local function runLoop(ui, config)
   print("Goodbye!")
 end
 
+-- Run the loop, restoring the screen (palette, colours) if anything errors
+local function runProtected(ui, config)
+  local ok, err = pcall(runLoop, ui, config)
+  if not ok then
+    pcall(ui.cleanup)
+    error(err, 0)
+  end
+end
+
 -- Run the interactive application (auto-detects TUI vs terminal)
 function occode.run(config)
   config = config or {}
@@ -147,19 +138,19 @@ function occode.run(config)
   end
 
   local ui = occode.getUI(config.forceTerminal)
-  runLoop(ui, config)
+  runProtected(ui, config)
 end
 
--- Run in TUI mode (requires GPU + screen)
+-- Run in TUI mode
 function occode.runTui(config)
-  local tui = require("oc-code.tui")
-  runLoop(tui, config)
+  local tui = require("cc-code.tui")
+  runProtected(tui, config)
 end
 
--- Run in terminal mode (fallback for devices without GPU/screen, or when forced)
+-- Run in terminal mode (line-based, for tiny screens or when forced)
 function occode.runTerminal(config)
-  local terminal = require("oc-code.terminal")
-  runLoop(terminal, config)
+  local terminal = require("cc-code.terminal")
+  runProtected(terminal, config)
 end
 
 -- Simple non-TUI mode for scripting

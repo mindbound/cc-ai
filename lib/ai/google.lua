@@ -1,8 +1,11 @@
-local internet = require("internet")
 local json = require("cmn-utils.json")
 local utils = require("ai.utils")
 
 local DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+local ENV_VAR = "GOOGLE_GENERATIVE_AI_API_KEY"
+local KEY_ERROR = "API key is required. Run: set " .. ENV_VAR .. " <key>, or pass apiKey to createGoogleGenerativeAI()."
+
+utils.defineSetting(ENV_VAR, "API key for the Google provider (cc-ai)")
 
 local function buildContents(opts)
   local contents = {}
@@ -100,7 +103,7 @@ local function createLanguageModel(modelId, config)
   function model.doGenerate(opts)
     local apiKey = config.getApiKey()
     if not apiKey or apiKey == "" then
-      error("API key is required. Set GOOGLE_GENERATIVE_AI_API_KEY environment variable or pass apiKey to createGoogleGenerativeAI().")
+      error(KEY_ERROR, 0)
     end
 
     local url = config.baseURL .. "/models/" .. modelId .. ":generateContent"
@@ -174,7 +177,7 @@ local function createLanguageModel(modelId, config)
   function model.doStream(opts, onChunk)
     local apiKey = config.getApiKey()
     if not apiKey or apiKey == "" then
-      error("API key is required. Set GOOGLE_GENERATIVE_AI_API_KEY environment variable or pass apiKey to createGoogleGenerativeAI().")
+      error(KEY_ERROR, 0)
     end
 
     local url = config.baseURL .. "/models/" .. modelId .. ":streamGenerateContent?alt=sse"
@@ -208,7 +211,7 @@ local function createLanguageModel(modelId, config)
     end
 
     local bodyJson = json.encode(requestBody)
-    local request = internet.request(url, bodyJson, headers)
+    local request = utils.httpPostStream(url, headers, bodyJson)
 
     local fullText = ""
     local finishReason = nil
@@ -224,6 +227,7 @@ local function createLanguageModel(modelId, config)
         local line = buffer:sub(1, lineEnd - 1)
         buffer = buffer:sub(lineEnd + 1)
 
+        line = line:gsub("\r$", "")
         if line:sub(1, 6) == "data: " then
           local data = line:sub(7)
           local ok, parsed = pcall(json.decode, data)
@@ -281,7 +285,7 @@ local function createGoogleGenerativeAI(options)
   local providerName = options.name or "google"
 
   local function getApiKey()
-    return options.apiKey or os.getenv("GOOGLE_GENERATIVE_AI_API_KEY")
+    return options.apiKey or utils.getEnv(ENV_VAR)
   end
 
   local function getHeaders()
