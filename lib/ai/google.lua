@@ -138,14 +138,10 @@ local function createLanguageModel(modelId, config)
 
     local bodyJson = json.encode(requestBody)
     local responseText = utils.httpPost(url, headers, bodyJson, opts.timeout)
-
-    local ok, responseData = pcall(json.decode, responseText)
-    if not ok then
-      error("Failed to parse response: " .. responseText)
-    end
+    local responseData = utils.decodeJSON(responseText)
 
     if responseData.error then
-      error(responseData.error.message or json.encode(responseData.error))
+      error(responseData.error.message or json.encode(responseData.error), 0)
     end
 
     return parseResponse(responseData), responseData

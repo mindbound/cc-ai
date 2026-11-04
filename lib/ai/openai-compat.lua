@@ -88,6 +88,15 @@ local function createLanguageModel(modelId, config)
   }
 
   function model.doGenerate(opts)
+    -- Some servers (seen with NanoGPT) send non-streamed replies with a
+    -- Content-Length that counts characters, not bytes, so CC: Tweaked cuts
+    -- off the end of any reply containing non-ASCII text. Streamed replies
+    -- are chunked and can't be cut that way; CC: Tweaked buffers them anyway.
+    if config.streamResponses then
+      local parsed = model.doStream(opts, nil, true)
+      return parsed, { streamed = true, model = modelId }
+    end
+
     checkApiKey(config)
 
     local url = chatURL(config)
@@ -124,14 +133,10 @@ local function createLanguageModel(modelId, config)
 
     local bodyJson = json.encode(requestBody)
     local responseText = utils.httpPost(url, headers, bodyJson, opts.timeout)
-
-    local ok, responseData = pcall(json.decode, responseText)
-    if not ok then
-      error("Failed to parse response: " .. responseText)
-    end
+    local responseData = utils.decodeJSON(responseText)
 
     if responseData.error then
-      error(responseData.error.message or json.encode(responseData.error))
+      error(responseData.error.message or json.encode(responseData.error), 0)
     end
 
     return parseResponse(responseData), responseData
@@ -165,7 +170,9 @@ local function createLanguageModel(modelId, config)
     end
   end
 
-  function model.doStream(opts, onChunk)
+  -- includeUsage: ask for token usage in the stream (OpenAI's stream_options),
+  -- used when generateText goes through a stream and should report usage
+  function model.doStream(opts, onChunk, includeUsage)
     checkApiKey(config)
 
     local url = chatURL(config)
@@ -177,6 +184,9 @@ local function createLanguageModel(modelId, config)
       messages = messages,
       stream = true,
     }
+    if includeUsage then
+      requestBody.stream_options = { include_usage = true }
+    end
 
     if opts.maxOutputTokens then
       if isGpt5Model(modelId) then
@@ -207,7 +217,58 @@ local function createLanguageModel(modelId, config)
     local fullText = ""
     local finishReason = nil
     local toolCalls = {}
+    local usage = {}
     local buffer = ""
+
+    local function handleLine(line)
+      if line == "" then return end
+      local eventType, data = utils.parseSSELine(line)
+      if eventType == "data" and data then
+        if data.error then
+          local e = data.error
+          error(type(e) == "table" and (e.message or json.encode(e)) or tostring(e), 0)
+        end
+        if type(data.usage) == "table" then
+          usage.inputTokens = data.usage.prompt_tokens
+          usage.outputTokens = data.usage.completion_tokens
+          usage.totalTokens = data.usage.total_tokens
+        end
+        local choice = data.choices and data.choices[1]
+        if choice then
+          local delta = choice.delta
+          if delta and delta.content then
+            fullText = fullText .. delta.content
+            if onChunk then
+              onChunk({ type = "text", text = delta.content })
+            end
+          end
+          if delta and delta.tool_calls then
+            for _, tc in ipairs(delta.tool_calls) do
+              local idx = (tc.index or 0) + 1
+              if not toolCalls[idx] then
+                toolCalls[idx] = {
+                  id = tc.id,
+                  type = "function",
+                  ["function"] = { name = "", arguments = "" },
+                }
+              end
+              if tc.id then toolCalls[idx].id = tc.id end
+              if tc["function"] then
+                if tc["function"].name then
+                  toolCalls[idx]["function"].name = toolCalls[idx]["function"].name .. tc["function"].name
+                end
+                if tc["function"].arguments then
+                  toolCalls[idx]["function"].arguments = toolCalls[idx]["function"].arguments .. tc["function"].arguments
+                end
+              end
+            end
+          end
+          if choice.finish_reason then
+            finishReason = choice.finish_reason
+          end
+        end
+      end
+    end
 
     for chunk in request do
       buffer = buffer .. chunk
@@ -216,61 +277,29 @@ local function createLanguageModel(modelId, config)
         if not lineEnd then break end
         local line = buffer:sub(1, lineEnd - 1)
         buffer = buffer:sub(lineEnd + 1)
-
-        if line ~= "" then
-          local eventType, data = utils.parseSSELine(line)
-          if eventType == "done" then
-            break
-          elseif eventType == "data" and data then
-            local choice = data.choices and data.choices[1]
-            if choice then
-              local delta = choice.delta
-              if delta and delta.content then
-                fullText = fullText .. delta.content
-                if onChunk then
-                  onChunk({ type = "text", text = delta.content })
-                end
-              end
-              if delta and delta.tool_calls then
-                for _, tc in ipairs(delta.tool_calls) do
-                  local idx = (tc.index or 0) + 1
-                  if not toolCalls[idx] then
-                    toolCalls[idx] = {
-                      id = tc.id,
-                      type = "function",
-                      ["function"] = { name = "", arguments = "" },
-                    }
-                  end
-                  if tc.id then toolCalls[idx].id = tc.id end
-                  if tc["function"] then
-                    if tc["function"].name then
-                      toolCalls[idx]["function"].name = toolCalls[idx]["function"].name .. tc["function"].name
-                    end
-                    if tc["function"].arguments then
-                      toolCalls[idx]["function"].arguments = toolCalls[idx]["function"].arguments .. tc["function"].arguments
-                    end
-                  end
-                end
-              end
-              if choice.finish_reason then
-                finishReason = choice.finish_reason
-              end
-            end
-          end
-        end
+        handleLine(line)
       end
     end
+    -- A final line without a trailing newline
+    handleLine(buffer)
 
+    -- Tool calls in index order (deltas are keyed by index)
+    local maxIndex = 0
+    for idx in pairs(toolCalls) do
+      if idx > maxIndex then maxIndex = idx end
+    end
     local toolCallsList = {}
-    for _, tc in pairs(toolCalls) do
-      table.insert(toolCallsList, tc)
+    for idx = 1, maxIndex do
+      if toolCalls[idx] then
+        table.insert(toolCallsList, toolCalls[idx])
+      end
     end
 
     return {
       text = fullText,
       finishReason = finishReason,
       toolCalls = #toolCallsList > 0 and toolCallsList or nil,
-      usage = {},
+      usage = usage,
     }
   end
 
@@ -279,7 +308,9 @@ end
 
 -- defaults: baseURL, name, envVar (API key setting), apiKeyError, and
 -- optionally baseURLEnvVar (setting read at request time when no baseURL
--- option is given), baseURLError, apiKeyOptional (keyless local servers)
+-- option is given), baseURLError, apiKeyOptional (keyless local servers),
+-- streamResponses (generateText uses streamed replies; options.stream
+-- overrides it per provider instance)
 local function createProvider(defaults)
   utils.defineSetting(defaults.envVar, "API key for the " .. defaults.name .. " provider (cc-ai)")
   if defaults.baseURLEnvVar then
@@ -325,6 +356,8 @@ local function createProvider(defaults)
       apiKeyError = defaults.apiKeyError,
       apiKeyOptional = defaults.apiKeyOptional,
       baseURLError = defaults.baseURLError,
+      -- generateText through the streaming endpoint (see doGenerate)
+      streamResponses = options.stream == nil and defaults.streamResponses or options.stream,
     }
 
     local function createModel(modelId)

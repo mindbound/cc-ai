@@ -122,6 +122,20 @@ function utils.httpPostStream(url, headers, body, timeout)
   end
 end
 
+-- Decode a JSON response body. On failure, raise a short error (the whole
+-- body would flood the screen) that says how big it was and how it ends:
+-- a reply cut short is the usual cause.
+function utils.decodeJSON(text)
+  local json = require("cmn-utils.json")
+  local ok, data = pcall(json.decode, text)
+  if ok then
+    return data
+  end
+  local tail = text:sub(-60):gsub("%s+", " ")
+  error(("Could not parse the API response (%d bytes; it may have been cut short). It ends with: %s")
+    :format(#text, tail), 0)
+end
+
 function utils.parseSSELine(line)
   line = line:gsub("\r$", "")
   if line:sub(1, 6) == "data: " then

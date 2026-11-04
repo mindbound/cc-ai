@@ -46,7 +46,7 @@ Live checks against a real API: `.\tests\live.ps1 -Provider custom -Model <model
 
 **lib/ai/utils/init.lua** - `httpPost`, `httpPostStream` (line iterator over the buffered body: CC:T has no live HTTP streaming), `parseSSELine`, `getEnv` (settings), `defineSetting`. Non-2xx responses raise with the API's error message.
 
-**lib/ai/google.lua**, **openai.lua**, **groq.lua**, **vercel.lua**, **custom.lua** - providers. All but Google are built on **openai-compat.lua**. `custom` reads its endpoint from the `AI_CUSTOM_BASE_URL` setting at request time, and its key (`AI_CUSTOM_API_KEY`) is optional.
+**lib/ai/google.lua**, **openai.lua**, **groq.lua**, **vercel.lua**, **custom.lua** - providers. All but Google are built on **openai-compat.lua**. `custom` reads its endpoint from the `AI_CUSTOM_BASE_URL` setting at request time, and its key (`AI_CUSTOM_API_KEY`) is optional. It sends `generateText` through streamed replies (`streamResponses`): NanoGPT's non-streamed replies were cut short in-game when they contained non-ASCII text (a character-count `Content-Length`; CraftOS-PC gets chunked replies and can't reproduce it). `tests/http-check.lua` checks this in-game.
 
 **lib/cmn-utils/** - `json` (rxi/json.lua), `glob`, `grep`, `path` (resolve against `shell.dir()`, yield helper), `text` (UTF-8 to CC charset for display, `fromCC` for user input going to APIs).
 

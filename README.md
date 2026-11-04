@@ -198,6 +198,8 @@ You can also run it in-game with `/cc-ai/tests/run`.
 
 `tests/live.ps1 -Provider <gateway|google|openai|groq|custom> -Model <model>` runs live checks against a real API (text, streaming, tools, structured output and a full agent task). Keys are read from the emulator data directory's settings, which you set yourself in the emulator: see the top of `tests/live.ps1`.
 
+`/cc-ai/tests/http-check [model]` checks in-game whether the custom endpoint's replies arrive complete, with and without streaming.
+
 ## License
 
 MIT

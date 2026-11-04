@@ -3,6 +3,7 @@
 
 return function(T)
   local ai = require("ai")
+  local json = require("cmn-utils.json")
   local google = require("ai.google")
   local openai = require("ai.openai")
   local mock = T.http
@@ -176,7 +177,7 @@ return function(T)
     -- Documented-style URL with /chat/completions already on it
     settings.set("AI_CUSTOM_BASE_URL", "https://nano-gpt.com/api/v1/chat/completions")
     settings.set("AI_CUSTOM_API_KEY", "c-test")
-    mock.push({ body = chat("hi from custom") })
+    mock.push({ body = mock.sse({ { choices = { { delta = { content = "hi from custom" }, finish_reason = "stop" } } } }, true) })
     local r = ai.generateText({ model = custom("deepseek/deepseek-v4.1-flash:thinking"), prompt = "x" })
     T.eq(r.text, "hi from custom")
     T.eq(mock.last().url, "https://nano-gpt.com/api/v1/chat/completions")
@@ -190,12 +191,60 @@ return function(T)
     T.eq(r.text, "local")
     T.eq(mock.last().url, "http://localhost:1234/v1/chat/completions")
     T.eq(mock.last().headers.Authorization, nil, "no Authorization header without a key")
-    -- Options override settings
+    -- Options override settings; stream = false uses plain replies
     mock.push({ body = chat("opt") })
-    ai.generateText({ model = custom.createCustom({ baseURL = "https://x.example/v1", apiKey = "k" })("m"), prompt = "x" })
+    ai.generateText({ model = custom.createCustom({ baseURL = "https://x.example/v1", apiKey = "k", stream = false })("m"), prompt = "x" })
     T.eq(mock.last().url, "https://x.example/v1/chat/completions")
     T.eq(mock.last().headers.Authorization, "Bearer k")
+    T.eq(mock.last().json.stream, nil)
     settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("custom provider: generateText goes through streamed replies", function()
+    local custom = require("ai.custom")
+    settings.set("AI_CUSTOM_BASE_URL", "https://nano-gpt.com/api/v1")
+    mock.reset()
+    -- Two tool calls whose deltas arrive out of index order, then usage in
+    -- a final chunk with no choices, and a last line without a newline
+    mock.push({ body = mock.sse({
+      { choices = { { delta = { tool_calls = { { index = 1, id = "b", ["function"] = { name = "get_weather", arguments = "{\"location\":\"Oslo\"}" } } } } } } },
+      { choices = { { delta = { tool_calls = { { index = 0, id = "a", ["function"] = { name = "get_weather", arguments = "{\"location\":\"Rome\"}" } } } }, finish_reason = "tool_calls" } } },
+    }, false) })
+    mock.push({ body = mock.sse({
+      { choices = { { delta = { content = "Rome 21, " } } } },
+      { choices = { { delta = { content = "Oslo 21 \226\128\148 both mild" }, finish_reason = "stop" } } },
+      { choices = {}, usage = { prompt_tokens = 30, completion_tokens = 8, total_tokens = 38 } },
+    }, false):gsub("\r\n\r\n$", "") })
+    local r = ai.generateText({ model = custom("deepseek/deepseek-v4.1-flash:thinking"), prompt = "Weather?", tools = { weather }, maxSteps = 3 })
+    T.eq(r.text, "Rome 21, Oslo 21 \226\128\148 both mild")
+    T.eq(r.finishReason, "stop")
+    T.eq(r.usage.totalTokens, 38, "usage from the final chunk")
+    T.eq(mock.requests[1].json.stream, true)
+    T.eq(mock.requests[1].json.stream_options.include_usage, true, "usage requested")
+    T.eq(r.toolResults[1].args.location, "Rome", "tool calls in index order")
+    T.eq(r.toolResults[2].args.location, "Oslo")
+    local msgs = mock.requests[2].json.messages
+    T.eq(msgs[#msgs - 1].tool_call_id, "a")
+    T.eq(msgs[#msgs].tool_call_id, "b")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("an error event inside a stream is raised", function()
+    mock.reset()
+    mock.push({ body = mock.sse({
+      { choices = { { delta = { content = "partial" } } } },
+      { error = { message = "Upstream provider overloaded" } },
+    }, false) })
+    T.raises(function() ai.streamText({ model = "a/b", prompt = "x" }) end, "Upstream provider overloaded")
+  end)
+
+  T.test("a reply that was cut short gives a short, clear error", function()
+    mock.reset()
+    local full = json.encode(chat("The answer \226\128\148 forty-two"))
+    mock.push({ body = full:sub(1, #full - 4) })
+    local err = T.raises(function() ai.generateText({ model = "a/b", prompt = "x" }) end, "may have been cut short")
+    T.contains(err, (#full - 4) .. " bytes")
+    T.ok(#err < 220, "error is short (" .. #err .. " chars)")
   end)
 
   T.test("generateObject parses JSON output", function()
