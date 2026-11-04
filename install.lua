@@ -6,7 +6,7 @@
 
 local args = { ... }
 local REPO = args[1] or "mindbound/cc-ai"
-local BRANCH = args[2] or "main"
+local BRANCH = args[2] or "master"
 local DIR = "/" .. fs.combine(args[3] or "/cc-ai", "")
 local STARTUP = "/startup/cc-ai.lua"
 
