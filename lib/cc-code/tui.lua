@@ -95,6 +95,7 @@ local state = {
   commandPopupIndex = 1,
   filteredCommands = {},
   completionType = nil,  -- nil for commands, else the handler's label
+  popupNavigated = false,  -- Tab/Up/Down used on the popup since the last edit
   -- Command history state
   commandHistory = {},
   historyIndex = 0,  -- 0 = not browsing, 1+ = position from end
@@ -130,11 +131,17 @@ local headerHints = {
   "/help",
 }
 
--- Popup footer hints, longest first
+-- Popup footer hints, longest first. Escape never reaches a CC:T computer
+-- (Minecraft closes the GUI), so the popup is passive: it only takes over
+-- Enter/Up/Down after Tab has been used on it.
 local popupHints = {
-  "Tab/Enter: select  Esc: close",
-  "Tab/Enter: select",
-  "Tab: select",
+  "Tab: complete",
+  "Tab",
+}
+local popupNavHints = {
+  "Up/Down: choose  Enter: pick",
+  "Enter: pick",
+  "Enter",
 }
 
 ---------------------------------------------------------------------------
@@ -483,7 +490,7 @@ local function drawCommandPopup()
   -- Bottom border with hint
   local hintY = popupY + maxItems + 1
   fill(popupX, hintY, popupWidth, c.status)
-  for _, hint in ipairs(popupHints) do
+  for _, hint in ipairs(state.popupNavigated and popupNavHints or popupHints) do
     if #hint <= popupWidth - 1 then
       put(popupX + 1, hintY, hint, c.dim, c.status, right)
       break
@@ -777,19 +784,46 @@ end
 -- Input
 ---------------------------------------------------------------------------
 
--- Update command popup state
-local function updateCommandPopup()
-  state.filteredCommands, state.completionType = filterCommands(state.inputBuffer)
-  state.showCommandPopup = #state.filteredCommands > 0
-  state.commandPopupIndex = math.min(state.commandPopupIndex, math.max(1, #state.filteredCommands))
-end
-
--- Hide command popup
-local function hideCommandPopup()
+-- Close the popup without redrawing
+local function clearPopupState()
   state.showCommandPopup = false
   state.filteredCommands = {}
   state.commandPopupIndex = 1
   state.completionType = nil
+  state.popupNavigated = false
+end
+
+-- Do two completion lists hold the same commands?
+local function sameCommands(a, b)
+  if #a ~= #b then return false end
+  for i = 1, #a do
+    if a[i].cmd ~= b[i].cmd then return false end
+  end
+  return true
+end
+
+-- Update command popup state
+local function updateCommandPopup()
+  local previous = state.filteredCommands
+  state.filteredCommands, state.completionType = filterCommands(state.inputBuffer)
+  state.showCommandPopup = #state.filteredCommands > 0
+  if sameCommands(previous, state.filteredCommands) then
+    state.commandPopupIndex = math.min(state.commandPopupIndex, math.max(1, #state.filteredCommands))
+  else
+    -- A different list: highlight its first entry
+    state.commandPopupIndex = 1
+  end
+end
+
+-- The input was edited: refilter, and the popup is passive again
+local function inputEdited()
+  state.popupNavigated = false
+  updateCommandPopup()
+end
+
+-- Hide command popup
+local function hideCommandPopup()
+  clearPopupState()
   tui.redrawContent()
 end
 
@@ -811,7 +845,7 @@ local function insertText(str)
                       str ..
                       state.inputBuffer:sub(state.inputCursor + 1)
   state.inputCursor = state.inputCursor + #str
-  updateCommandPopup()
+  inputEdited()
 end
 
 -- Show a command history entry (or the saved input for index 0)
@@ -822,7 +856,10 @@ local function showHistoryEntry()
     state.inputBuffer = state.commandHistory[#state.commandHistory - state.historyIndex + 1]
   end
   state.inputCursor = #state.inputBuffer
-  updateCommandPopup()
+  -- A recalled line is sent as it is: keep the popup closed (so Up/Down keep
+  -- browsing history) until the next edit or Tab. readInput's loop redraws
+  -- the content area under the old popup.
+  clearPopupState()
 end
 
 -- Move the popup selection by delta (wrapping) and show it in the input
@@ -841,19 +878,26 @@ local function cyclePopup(delta, updateInput)
       state.inputCursor = #state.inputBuffer
     end
   end
+  state.popupNavigated = true
 end
 
 -- Handle a "key" event; returns the submitted input when Enter submits
 local function handleKey(code)
   local buf = state.inputBuffer
-  local popup = state.showCommandPopup and #state.filteredCommands > 0
 
   if code == keys.enter or code == keys.numPadEnter then
-    -- If popup is showing, select the command
-    if popupVisible() then
+    local only = state.filteredCommands[1]
+    if popupVisible() and state.popupNavigated then
+      -- The user picked an entry with Tab/Up/Down: take it
+      selectCommand()
+    elseif state.showCommandPopup and state.completionType == nil and
+           #state.filteredCommands == 1 and #buf < #only.cmd then
+      -- An unfinished command with one match ("/he"): complete it
+      state.commandPopupIndex = 1
       selectCommand()
     else
-      -- Submit the input; add to command history if different from last entry
+      -- Submit the input exactly as typed; add to command history if
+      -- different from last entry
       if buf ~= "" and state.commandHistory[#state.commandHistory] ~= buf then
         table.insert(state.commandHistory, buf)
       end
@@ -861,30 +905,32 @@ local function handleKey(code)
     end
 
   elseif code == keys.tab then
-    if popup then
-      -- Cycle to next choice and show it in the input
-      cyclePopup(1, true)
-    else
-      -- Show popup if not visible
+    if not (state.showCommandPopup and #state.filteredCommands > 0) then
       updateCommandPopup()
     end
-
-  elseif keys.escape and code == keys.escape then
-    if state.showCommandPopup then
-      hideCommandPopup()
+    if state.showCommandPopup and #state.filteredCommands > 0 then
+      -- First Tab takes the highlighted entry; later Tabs cycle
+      local cur = state.filteredCommands[state.commandPopupIndex]
+      if cur and state.inputBuffer ~= cur.cmd then
+        state.inputBuffer = cur.cmd
+        state.inputCursor = #state.inputBuffer
+        state.popupNavigated = true
+      else
+        cyclePopup(1, true)
+      end
     end
 
   elseif code == keys.backspace then
     if state.inputCursor > 0 then
       state.inputBuffer = buf:sub(1, state.inputCursor - 1) .. buf:sub(state.inputCursor + 1)
       state.inputCursor = state.inputCursor - 1
-      updateCommandPopup()
+      inputEdited()
     end
 
   elseif code == keys.delete then
     if state.inputCursor < #buf then
       state.inputBuffer = buf:sub(1, state.inputCursor) .. buf:sub(state.inputCursor + 2)
-      updateCommandPopup()
+      inputEdited()
     end
 
   elseif code == keys.left then
@@ -919,7 +965,7 @@ local function handleKey(code)
     end
 
   elseif code == keys.up then
-    if popupVisible() then
+    if popupVisible() and state.popupNavigated then
       cyclePopup(-1, false)
     elseif isCtrlDown() then
       tui.scrollUp(1)
@@ -935,7 +981,7 @@ local function handleKey(code)
     end
 
   elseif code == keys.down then
-    if popupVisible() then
+    if popupVisible() and state.popupNavigated then
       cyclePopup(1, false)
     elseif isCtrlDown() then
       tui.scrollDown(1)
@@ -981,10 +1027,7 @@ end
 local function finishInput()
   resetInput()
   state.reading = false
-  state.showCommandPopup = false
-  state.filteredCommands = {}
-  state.commandPopupIndex = 1
-  state.completionType = nil
+  clearPopupState()
   draw(function()
     drawContentArea()
     drawStatusBar()
@@ -993,18 +1036,21 @@ local function finishInput()
 end
 
 -- Read user input. Returns the submitted line, or nil when the user asked to
--- quit (terminate / Ctrl+T on an empty line).
+-- quit (Ctrl+T on an empty line).
 function tui.readInput()
   if not win then
     error("tui.init() must be called before tui.readInput()", 2)
   end
   resetInput()
-  state.showCommandPopup = false
-  state.filteredCommands = {}
-  state.commandPopupIndex = 1
-  state.completionType = nil
+  clearPopupState()
   state.ctrlHeld = {}
   state.reading = true
+
+  -- A Ctrl+T held to cancel a request can land here if the reply came first.
+  -- A fresh Ctrl+T sends a key event for T before the terminate, so quit
+  -- only after one, or once the prompt has been up for a second.
+  local startedAt = os.epoch("utc")
+  local sawT = false
 
   -- The terminal may have been resized while we were not reading events
   checkSize()
@@ -1023,26 +1069,22 @@ function tui.readInput()
       if state.inputBuffer ~= "" then
         -- Ctrl+T with text: clear the line and keep reading
         resetInput()
-        state.showCommandPopup = false
-        state.filteredCommands = {}
-        state.commandPopupIndex = 1
-        state.completionType = nil
+        clearPopupState()
         changed = true
-      else
+      elseif sawT or os.epoch("utc") - startedAt >= 1000 then
         finishInput()
         return nil
       end
+      -- Otherwise it is left over from cancelling the last request: ignore it
 
     elseif ev == "char" then
-      if p1 == " " and popupVisible() then
-        -- Space selects the command from the popup
-        selectCommand()
-      else
-        insertText(p1)
-      end
+      insertText(p1)
       changed = true
 
     elseif ev == "key" then
+      if p1 == keys.t then
+        sawT = true
+      end
       if p1 == keys.leftCtrl or p1 == keys.rightCtrl then
         state.ctrlHeld[p1] = true
       else
@@ -1155,6 +1197,22 @@ function tui.clear()
   state.history = {}
   state.scrollOffset = 0
   tui.clearContent()
+end
+
+-- Put the parent's own palette back for a while, e.g. while a shell command
+-- runs that may open a multishell tab (a new tab copies the palette it sees)
+function tui.suspendTheme()
+  if not paletteChanged or not parent then return end
+  for slot, rgb in pairs(savedPalette) do
+    parent.setPaletteColour(slot, rgb[1], rgb[2], rgb[3])
+  end
+end
+
+-- Load the theme again after suspendTheme (showing the window pushes its
+-- palette to the parent)
+function tui.resumeTheme()
+  if not paletteChanged then return end
+  draw(function() end)
 end
 
 -- Cleanup on exit: restore the palette and leave a clean white-on-black screen

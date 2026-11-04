@@ -83,7 +83,9 @@ local function getCompletions(args)
       local modelSearch = parts[2] or ""
       local prefix = "/model " .. providerName .. " "
       for _, model in ipairs(providerData.models) do
-        if modelSearch == "" or model:lower():find(modelSearch:lower(), 1, true) == 1 then
+        -- Entries with spaces are notes for the /model listing, not model ids
+        if not model:find(" ") and
+           (modelSearch == "" or model:lower():find(modelSearch:lower(), 1, true) == 1) then
           table.insert(results, { cmd = prefix .. model, desc = providerData.name })
         end
       end
@@ -94,6 +96,14 @@ local function getCompletions(args)
   -- Complete first argument (gateway models or providers)
   local searchTerm = (parts[1] or ""):lower()
 
+  -- Direct providers first, so the first (highlighted) entry is not a
+  -- gateway model that needs a different API key
+  for _, name in ipairs({ "google", "openai", "groq" }) do
+    if searchTerm == "" or name:find(searchTerm, 1, true) == 1 then
+      table.insert(results, { cmd = "/model " .. name, desc = providers[name].name })
+    end
+  end
+
   -- Gateway models
   for _, model in ipairs(providers.gateway.models) do
     if model:find("/") and (searchTerm == "" or model:lower():find(searchTerm, 1, true) == 1) then
@@ -101,20 +111,15 @@ local function getCompletions(args)
     end
   end
 
-  -- Direct providers
-  for name, data in pairs(providers) do
-    if name ~= "gateway" and (searchTerm == "" or name:find(searchTerm, 1, true) == 1) then
-      table.insert(results, { cmd = "/model " .. name, desc = data.name })
-    end
-  end
-
   return results
 end
 
--- Register completion handler with TUI (if available)
-local ok, tui = pcall(require, "cc-code.tui")
-if ok and tui.registerCompletion then
-  tui.registerCompletion("/model", getCompletions, "Models")
+-- Register the completion handler with both UI modules (TUI and line mode)
+for _, uiName in ipairs({ "cc-code.tui", "cc-code.terminal" }) do
+  local ok, ui = pcall(require, uiName)
+  if ok and type(ui) == "table" and ui.registerCompletion then
+    ui.registerCompletion("/model", getCompletions, "Models")
+  end
 end
 
 return skills.create({

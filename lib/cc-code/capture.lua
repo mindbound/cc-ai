@@ -5,6 +5,9 @@
 
 local capture = {}
 
+-- Optional { before = fn, after = fn }, called around every command
+capture.hooks = nil
+
 -- Virtual terminal height. Large so programs that page their output
 -- (textutils.pagedPrint, used by ls/help) never stop to wait for a key.
 local VIRTUAL_HEIGHT = 999
@@ -151,6 +154,13 @@ function capture.run(command, workdir)
   local width = math.max(parent.getSize(), 80)
   local recorder = capture.createTerminal(width, VIRTUAL_HEIGHT, parent)
 
+  -- Optional UI hooks around the command (the TUI puts the normal palette
+  -- back, so a multishell tab the command opens doesn't copy the theme)
+  local hooks = capture.hooks
+  if hooks and hooks.before then
+    pcall(hooks.before)
+  end
+
   local previous = term.redirect(recorder)
   local ok, result
   local terminated = false
@@ -166,6 +176,11 @@ function capture.run(command, workdir)
     ok, result = pcall(shell.run, command)
   end)
   term.redirect(previous)
+
+  -- shell.run ran in pcall, so this runs even when the command errored
+  if hooks and hooks.after then
+    pcall(hooks.after)
+  end
 
   if oldDir then
     shell.setDir(oldDir)

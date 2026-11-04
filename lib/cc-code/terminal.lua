@@ -4,7 +4,6 @@
 
 local json = require("cmn-utils.json")
 local cctext = require("cmn-utils.text")
-local completion = require("cc.completion")
 
 -- The CC colour API ("terminal.colors" below is the table of UI roles)
 local ccColors = colors
@@ -150,6 +149,18 @@ function terminal.registerCompletion(prefix, handler, label)
   completionHandlers[prefix:lower()] = { handler = handler, label = label }
 end
 
+-- Suffixes that complete line to one of choices (case-insensitive)
+local function suffixes(line, choices)
+  local lowerLine = line:lower()
+  local out = {}
+  for _, choice in ipairs(choices) do
+    if #choice > #line and choice:sub(1, #line):lower() == lowerLine then
+      out[#out + 1] = choice:sub(#line + 1)
+    end
+  end
+  return out
+end
+
 -- Completion function for read(): returns suffixes that complete the line
 local function completeInput(line)
   if line:sub(1, 1) ~= "/" then
@@ -165,12 +176,12 @@ local function completeInput(line)
       local choices = {}
       if ok and type(results) == "table" then
         for _, item in ipairs(results) do
-          if type(item.cmd) == "string" then
+          if type(item) == "table" and type(item.cmd) == "string" then
             choices[#choices + 1] = item.cmd
           end
         end
       end
-      return completion.choice(line, choices)
+      return suffixes(line, choices)
     end
   end
 
@@ -178,31 +189,78 @@ local function completeInput(line)
   if line:find("%s") then
     return {}
   end
-  return completion.choice(line, commandNames)
+  return suffixes(line, commandNames)
 end
 
 -- Read user input with CC's read() (cursor keys, history, paste, Tab
--- completion). Returns nil when the user terminates (Ctrl+T).
+-- completion). Ctrl+T clears a typed line; on an empty line it returns nil
+-- (quit).
 function terminal.readInput()
-  -- Reset terminal state before showing prompt
-  resetTerminalState()
-  setColor(terminal.colors.prompt)
-  write("> ")
-  term.setTextColour(ccColors.white)
+  -- A Ctrl+T held to cancel a request can land here if the reply came first.
+  -- A fresh Ctrl+T sends a key event for T before the terminate, so quit
+  -- only after one, or once the prompt has been up for a second.
+  local startedAt = os.epoch("utc")
+  local sawT = false
 
-  local ok, line = pcall(read, nil, inputHistory, completeInput)
-  if not ok then
-    if line == "Terminated" or tostring(line):find("Terminated", 1, true) then
+  while true do
+    -- Reset terminal state before showing prompt
+    resetTerminalState()
+    setColor(terminal.colors.prompt)
+    write("> ")
+    term.setTextColour(ccColors.white)
+
+    -- The line read() holds, or nil if unknown. read() passes it to the
+    -- completion function after each edit with the cursor at the end (an
+    -- empty line always qualifies), but not after Up/Down history recall.
+    local current = ""
+    local ok, line
+    parallel.waitForAny(function()
+      ok, line = pcall(read, nil, inputHistory, function(text)
+        current = text
+        return completeInput(text)
+      end)
+    end, function()
+      -- pullEventRaw: this must survive the terminate
+      while true do
+        local _, key = os.pullEventRaw("key")
+        if key == keys.up or key == keys.down then
+          current = nil
+        elseif key == keys.t then
+          sawT = true
+        end
+      end
+    end)
+
+    if ok then
+      if line and line ~= "" then
+        -- read() left its echo on the row above; the caller prints the line
+        -- again (printRole "user"), so remove read()'s copy
+        local _, y = term.getCursorPos()
+        if y > 1 then
+          term.setCursorPos(1, y - 1)
+          term.clearLine()
+        end
+        if inputHistory[#inputHistory] ~= line then
+          table.insert(inputHistory, line)
+        end
+      end
+      return line
+    end
+
+    if not tostring(line):find("Terminated", 1, true) then
+      error(line, 0)
+    end
+    if current == "" and (sawT or os.epoch("utc") - startedAt >= 1000) then
+      -- Ctrl+T at an empty prompt: quit
       print()
       return nil
     end
-    error(line, 0)
+    -- Ctrl+T with text typed (or left over from cancelling the last
+    -- request): clear the line and read again
+    local _, y = term.getCursorPos()
+    term.clearLine()
+    term.setCursorPos(1, y)
   end
-
-  if line and line ~= "" and inputHistory[#inputHistory] ~= line then
-    table.insert(inputHistory, line)
-  end
-  return line
 end
 
 -- Clear (just prints separator)

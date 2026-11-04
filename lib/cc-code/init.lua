@@ -4,6 +4,7 @@
 local agent = require("cc-code.agent")
 local tools = require("cc-code.tools")
 local skills = require("cc-code.skills")
+local capture = require("cc-code.capture")
 
 local occode = {}
 
@@ -59,6 +60,13 @@ local function runLoop(ui, config)
 
   -- Initialize UI
   ui.init(config)
+
+  -- Shell commands (! prefix and the shell tool) run with the UI's theme
+  -- palette taken off, so programs they start don't inherit it
+  if ui.suspendTheme then
+    capture.hooks = { before = ui.suspendTheme, after = ui.resumeTheme }
+  end
+
   ui.print("Welcome to cc-code v" .. occode.version, ui.colors and ui.colors.assistant)
   ui.print("Type /help for available commands.", ui.colors and ui.colors.dim)
   ui.print("Use !<command> to execute shell commands (e.g., !ls)", ui.colors and ui.colors.dim)
@@ -115,6 +123,7 @@ local function runLoop(ui, config)
   end
 
   -- Cleanup
+  capture.hooks = nil
   ui.cleanup()
   print("Goodbye!")
 end
@@ -123,6 +132,7 @@ end
 local function runProtected(ui, config)
   local ok, err = pcall(runLoop, ui, config)
   if not ok then
+    capture.hooks = nil
     pcall(ui.cleanup)
     error(err, 0)
   end
