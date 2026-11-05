@@ -96,6 +96,7 @@ function mock.reset()
   mock.queue = {}
   mock.requests = {}
   mock.routes = {}
+  mock.held = {}
 end
 
 -- The last request, with its JSON body decoded
@@ -126,6 +127,63 @@ function mock.post(req, body, headers)
     return nil, resp.reason or "HTTP error", handle
   end
   return handle
+end
+
+-- http.request: the asynchronous form. The reply arrives as an
+-- http_success/http_failure event for the URL exactly as given (cc-ai tags
+-- it with a "#cc-ai-<n>" fragment). Requests are recorded with the fragment
+-- removed (url) and as sent (rawUrl). A queued response with hold = true is
+-- not answered: mock.release(n) sends it later, as a slow reply would.
+mock.held = {}
+
+local function answer(rawUrl, resp)
+  if resp.fail then
+    os.queueEvent("http_failure", rawUrl, resp.fail)
+    return
+  end
+  local handle = makeHandle(resp.code or 200, resp.body or "")
+  handle.close = function() resp.closed = true end
+  if (resp.code or 200) >= 400 then
+    os.queueEvent("http_failure", rawUrl, resp.reason or "HTTP error", handle)
+  else
+    os.queueEvent("http_success", rawUrl, handle)
+  end
+end
+
+function mock.request(req, body, headers, binary)
+  if type(req) ~= "table" then
+    req = { url = req, body = body, headers = headers, binary = binary }
+  end
+  -- Real CC: Tweaked raises for timeouts outside 0-60 seconds
+  if req.timeout ~= nil and (type(req.timeout) ~= "number" or req.timeout < 0 or req.timeout > 60) then
+    error("timeout out of range (" .. tostring(req.timeout) .. ")", 2)
+  end
+  local decoded
+  pcall(function() decoded = json.decode(req.body) end)
+  table.insert(mock.requests, {
+    url = (req.url:gsub("#.*$", "")), rawUrl = req.url, method = req.method,
+    headers = req.headers, body = req.body, json = decoded, timeout = req.timeout, binary = req.binary,
+  })
+  local resp = table.remove(mock.queue, 1)
+  if not resp then
+    error("mock http: unexpected request to " .. tostring(req.url))
+  end
+  if type(resp.body) == "table" then
+    resp.body = json.encode(resp.body)
+  end
+  if resp.hold then
+    table.insert(mock.held, { rawUrl = req.url, resp = resp })
+  else
+    answer(req.url, resp)
+  end
+  return true
+end
+
+-- Send the reply of the n-th held request (default: the oldest)
+function mock.release(n)
+  local held = table.remove(mock.held, n or 1)
+  answer(held.rawUrl, held.resp)
+  return held.resp
 end
 
 -- http.get: answered from mock.routes[url] (a string body), else 404

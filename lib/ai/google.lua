@@ -137,7 +137,7 @@ local function createLanguageModel(modelId, config)
     end
 
     local bodyJson = json.encode(requestBody)
-    local responseText = utils.httpPost(url, headers, bodyJson, opts.timeout)
+    local responseText = utils.httpPost(url, headers, bodyJson, opts.timeout, utils.waitHooks(opts))
     local responseData = utils.decodeJSON(responseText)
 
     if responseData.error then
@@ -207,7 +207,7 @@ local function createLanguageModel(modelId, config)
     end
 
     local bodyJson = json.encode(requestBody)
-    local request = utils.httpPostStream(url, headers, bodyJson, opts.timeout)
+    local request = utils.httpPostStream(url, headers, bodyJson, opts.timeout, utils.waitHooks(opts))
 
     local fullText = ""
     local finishReason = nil

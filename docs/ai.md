@@ -175,6 +175,36 @@ local result = ai.generateText({
 })
 ```
 
+Each step is one model request; the tools a reply asks for run before the next one. When the loop stops at `maxSteps` with tool results the model has not seen yet, `result.stepLimitReached` is `true`. `result.steps` counts the requests.
+
+If a tool call's arguments are not valid JSON (usually a reply cut off at the output token limit, `finishReason == "length"`), the tool does not run. The model gets an error result saying so instead. Blank arguments count as no arguments (`{}`).
+
+A tool can raise `"Terminated"` (or `{ terminated = true, result = {...} }`, with a partial result) to cancel the call, as Ctrl+T does. The finished tool results of that step and an error for each remaining call are still added to `messages`, so the history stays valid, and then `generateText` raises `"Terminated"`.
+
+### Waiting and step hooks
+
+Requests are asynchronous, and the SDK waits for the reply in its own event loop. These optional hooks let a program stay live meanwhile (they work with `generateText` and `streamText`):
+
+```lua
+ai.generateText({
+  model = "openai/gpt-4o-mini",
+  prompt = "...",
+  onStepStart = function(step, maxSteps) end,  -- before each model request
+  onWait = function(seconds) end,              -- about twice a second while waiting
+  onEvent = function(event, ...) end,          -- other events that arrive meanwhile
+  onStepFinish = function(info) end,           -- after each step (info.step, .text,
+                                               -- .toolCalls, .finishReason, .usage)
+})
+```
+
+`onWait` and `onEvent` must not yield: no `sleep`, `os.pullEvent`, `read`, `rednet.receive`, `http.get` or turtle moves. A nested event pull could take the reply's own event, so a hook that yields raises an error instead. `onStepStart` and `onStepFinish` run outside the wait and may yield. `onStepFinish`'s `info.cancelled` is `true` when Ctrl+T stopped one of that step's tools.
+
+Ctrl+T while waiting raises `"Terminated"`, as a blocking `http.post` does. Each request is sent with a `#cc-ai-<session>-<n>` fragment on its URL, unique to the request and to the program that sent it. The server never sees the fragment, but CC: Tweaked reports the URL with the reply. That way, a late reply to a cancelled request is recognised and closed, and a reply meant for another program (another multishell tab, for example) is left alone. A program with its own event loop can close such replies too: call `require("ai.utils").discardStale(event, ...)` with each event it pulls.
+
+### Model specs
+
+`ai.resolveModel(spec)` turns a string into a model: `"custom:deepseek/deepseek-v4.1-flash:thinking"`, `"google:gemini-2.5-flash"`, `"openai:gpt-4o"` or `"groq:..."` give direct provider models. `"gateway:openai/gpt-4o"` or plain `"openai/gpt-4o"` is a gateway model. Only the first `:` after a known provider name splits, because model ids contain `:` themselves. `ai.modelSpec(model)` gives the string back.
+
 ## Examples
 
 Run examples from the CraftOS shell:

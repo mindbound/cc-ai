@@ -3,7 +3,7 @@
 
 return function(T)
   local mock = T.http
-  local root = "/" .. fs.getDir(fs.getDir(shell.getRunningProgram()))
+  local root = T.root
   local STARTUP = "/startup/cc-ai.lua"
 
   local function treeJson(paths)

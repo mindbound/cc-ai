@@ -255,4 +255,182 @@ return function(T)
     T.eq(r.object.name, "Steve")
     T.contains(mock.last().json.messages[1].content, "Output JSON only")
   end)
+
+  T.test("requests are tagged so each reply matches its own request", function()
+    mock.reset()
+    mock.push({ body = chat("one") })
+    mock.push({ body = chat("two") })
+    ai.generateText({ model = "a/b", prompt = "x" })
+    ai.generateText({ model = "a/b", prompt = "y" })
+    local first, second = mock.requests[1], mock.requests[2]
+    T.eq(first.url, "https://ai-gateway.vercel.sh/v1/chat/completions")
+    T.eq(first.method, "POST")
+    T.ok(first.rawUrl:find("#cc%-ai%-%x+%-%d+$"), "fragment tag: " .. first.rawUrl)
+    T.ok(first.rawUrl ~= second.rawUrl, "a new tag per request")
+  end)
+
+  T.test("each program's copy of the SDK tags its requests differently", function()
+    -- Every program (each cc-code run, each multishell tab) loads its own copy
+    local function loadUtils()
+      return assert(loadfile(T.root .. "/lib/ai/utils/init.lua", "t", _ENV))()
+    end
+    local a, b = loadUtils(), loadUtils()
+    mock.reset()
+    -- A's request is cancelled; B then sends its first request
+    mock.push({ hold = true, body = "late reply for A" })
+    os.queueEvent("terminate")
+    T.raises(function() a.httpPost("https://x.test/v1/chat", {}, "{}") end, "Terminated")
+    local tagA = mock.requests[1].rawUrl
+    mock.push({ hold = true, body = "B's reply" })
+    parallel.waitForAny(function()
+      b.httpPost("https://x.test/v1/chat", {}, "{}")
+    end, function() end)
+    local tagB = mock.requests[2].rawUrl
+    T.ok(tagA ~= tagB, "B's tag differs from A's: " .. tagA .. " / " .. tagB)
+    -- B's reply arrives while A's prompt loop runs: A must not close it
+    local bReply = mock.release(2)
+    local ev, url, handle = os.pullEvent("http_success")
+    T.eq(url, tagB)
+    T.eq(a.discardStale(ev, url, handle), false, "A leaves B's reply alone")
+    T.eq(bReply.closed, nil)
+    -- A's own late reply is recognised and closed
+    local aReply = mock.release(1)
+    ev, url, handle = os.pullEvent("http_success")
+    T.eq(a.discardStale(ev, url, handle), true)
+    T.eq(aReply.closed, true)
+  end)
+
+  T.test("a wait hook that yields fails instead of hanging", function()
+    mock.reset()
+    mock.push({ hold = true, body = chat("never seen") })
+    T.raises(function()
+      ai.generateText({ model = "a/b", prompt = "x", onWait = function() sleep(0.1) end })
+    end, "yielded")
+  end)
+
+  T.test("a late reply to a cancelled request is not taken as the next answer", function()
+    mock.reset()
+    -- Request 1 is slow; Ctrl+T cancels it while it waits
+    mock.push({ hold = true, body = chat("STALE answer to the first question") })
+    os.queueEvent("terminate")
+    T.raises(function() ai.generateText({ model = "a/b", prompt = "first" }) end, "Terminated")
+    -- Its reply arrives just as the second question is sent
+    local stale = mock.release()
+    mock.push({ body = chat("fresh answer") })
+    local r = ai.generateText({ model = "a/b", prompt = "second" })
+    T.eq(r.text, "fresh answer")
+    T.eq(stale.closed, true, "the stale reply was closed unread")
+  end)
+
+  T.test("onWait ticks and onEvent sees other events while waiting", function()
+    mock.reset()
+    mock.push({ hold = true, body = chat("done") })
+    os.queueEvent("mouse_scroll", -1, 5, 5)
+    local waits, events = {}, {}
+    local r = ai.generateText({
+      model = "a/b", prompt = "x",
+      onWait = function(seconds)
+        table.insert(waits, seconds)
+        if #waits == 2 then mock.release() end
+      end,
+      onEvent = function(event, p1) table.insert(events, event .. ":" .. tostring(p1)) end,
+    })
+    T.eq(r.text, "done")
+    T.eq(#waits, 2)
+    T.ok(waits[1] >= 0.4 and waits[2] > waits[1], "elapsed seconds grow: " .. waits[1] .. ", " .. waits[2])
+    T.eq(events[1], "mouse_scroll:-1")
+  end)
+
+  T.test("tool arguments that are not valid JSON don't run the tool", function()
+    mock.reset()
+    local ran = 0
+    local writer = ai.tool({ name = "write_file", parameters = { type = "object", properties = {} },
+      execute = function() ran = ran + 1 return { ok = true } end })
+    local noArgs = ai.tool({ name = "list", parameters = { type = "object", properties = {} },
+      execute = function(args) return { gotTable = type(args) == "table" } end })
+    local cut = { choices = { { message = { role = "assistant", content = "", tool_calls = {
+      { id = "w", type = "function", ["function"] = { name = "write_file", arguments = "{\"path\":\"/a.lua\",\"content\":\"print(" } },
+      { id = "l", type = "function", ["function"] = { name = "list", arguments = "" } },
+    } }, finish_reason = "length" } } }
+    mock.push({ body = cut })
+    mock.push({ body = chat("ok") })
+    local r = ai.generateText({ model = "a/b", prompt = "x", tools = { writer, noArgs }, maxSteps = 3 })
+    T.eq(ran, 0, "write_file did not run")
+    T.contains(r.toolResults[1].result.error, "not valid JSON")
+    T.contains(r.toolResults[1].result.error, "output token limit")
+    T.eq(r.toolResults[2].result.gotTable, true, "blank arguments mean no arguments")
+    local msgs = mock.requests[2].json.messages
+    T.eq(msgs[2].tool_calls[1]["function"].arguments, "{}", "broken JSON is not sent back")
+  end)
+
+  T.test("the step limit is reported", function()
+    mock.reset()
+    local call = { tool_calls = { { id = "c", type = "function", ["function"] = { name = "get_weather", arguments = "{\"location\":\"Oslo\"}" } } } }
+    mock.push({ body = chat("Checking.", call) })
+    mock.push({ body = chat("Checking again.", call) })
+    local starts = {}
+    local r = ai.generateText({ model = "a/b", prompt = "x", tools = { weather }, maxSteps = 2,
+      onStepStart = function(step, maxSteps) table.insert(starts, step .. "/" .. maxSteps) end })
+    T.eq(r.stepLimitReached, true)
+    T.eq(r.steps, 2)
+    T.eq(#mock.requests, 2)
+    T.eq(table.concat(starts, ","), "1/2,2/2")
+    mock.reset()
+    mock.push({ body = chat("Sunny") })
+    r = ai.generateText({ model = "a/b", prompt = "x", tools = { weather }, maxSteps = 2 })
+    T.eq(r.stepLimitReached, false)
+    T.eq(r.steps, 1)
+  end)
+
+  T.test("Ctrl+T in a tool keeps finished results and skips the rest", function()
+    mock.reset()
+    local ran = {}
+    local function named(name, fn)
+      return ai.tool({ name = name, parameters = { type = "object", properties = {} }, execute = fn })
+    end
+    local tools = {
+      named("first", function() table.insert(ran, "first") return { done = true } end),
+      named("second", function()
+        table.insert(ran, "second")
+        error({ terminated = true, result = { output = "partial output" } }, 0)
+      end),
+      named("third", function() table.insert(ran, "third") return {} end),
+    }
+    local calls = {}
+    for i, name in ipairs({ "first", "second", "third" }) do
+      calls[i] = { id = "c" .. i, type = "function", ["function"] = { name = name, arguments = "{}" } }
+    end
+    -- The skipped call's arguments were cut off: they must not be kept
+    calls[3]["function"].arguments = "{\"path\":\"/x.lua\",\"content\":\"print("
+    mock.push({ body = chat(nil, { tool_calls = calls }) })
+    local messages = { { role = "user", content = "go" } }
+    local finished, cancelledFlag = 0, nil
+    T.raises(function()
+      ai.generateText({ model = "a/b", messages = messages, tools = tools, maxSteps = 3,
+        onStepFinish = function(info) finished = finished + 1 cancelledFlag = info.cancelled end })
+    end, "Terminated")
+    T.eq(table.concat(ran, ","), "first,second", "the third tool did not run")
+    T.eq(finished, 1, "the step finished with every result in the messages")
+    T.eq(cancelledFlag, true, "onStepFinish says the step was cancelled")
+    T.eq(messages[2].tool_calls[3]["function"].arguments, "{}", "broken arguments of a skipped call")
+    T.eq(#messages, 5, "user, assistant, three tool results")
+    T.contains(messages[3].content, "\"done\":true")
+    T.contains(messages[4].content, "partial output")
+    T.contains(messages[4].content, "Stopped by the user")
+    T.contains(messages[5].content, "Skipped")
+  end)
+
+  T.test("resolveModel reads provider:model specs", function()
+    settings.set("AI_CUSTOM_BASE_URL", "https://nano-gpt.com/api/v1")
+    local m = ai.resolveModel("custom:deepseek/deepseek-v4.1-flash:thinking")
+    T.eq(m.provider, "custom")
+    T.eq(m.modelId, "deepseek/deepseek-v4.1-flash:thinking", "only the first colon splits")
+    T.eq(ai.modelSpec(m), "custom:deepseek/deepseek-v4.1-flash:thinking")
+    T.eq(ai.resolveModel("Google:gemini-2.5-flash").provider, "google")
+    T.eq(ai.resolveModel("openai/gpt-4o"), "openai/gpt-4o", "gateway strings stay strings")
+    T.eq(ai.resolveModel("gateway:openai/gpt-4o"), "openai/gpt-4o")
+    T.eq(ai.resolveModel("anthropic/claude:thinking"), "anthropic/claude:thinking")
+    T.eq(ai.modelSpec("openai/gpt-4o"), "openai/gpt-4o")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
 end

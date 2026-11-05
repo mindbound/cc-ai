@@ -6,6 +6,8 @@
 -- UTF-8 characters instead of bytes, which broke JSON decoding; "#" next
 -- to "counted" shows whether that is the case.
 --   /cc-ai/tests/http-check deepseek/deepseek-v4.1-flash:thinking
+-- Also checks that a request URL tagged with a "#cc-ai-..." fragment (how
+-- cc-ai tells replies apart) is accepted and reported back unchanged.
 -- Prints a summary (decode errors with the bytes around them) and saves it
 -- to /http-check.txt; raw replies go to /http-check-<mode>.txt. Never
 -- prints the key.
@@ -118,6 +120,42 @@ local function run(stream, binary)
   out("  decodes: " .. tostring(ok))
 end
 
+-- cc-ai sends each request with a "#cc-ai-..." fragment, so a late reply to
+-- a cancelled request can be told apart from the next one. CC: Tweaked must
+-- accept it, not send it (any non-2xx status, such as 400 or 404, may mean
+-- it was sent), and report the URL in the reply event exactly as given.
+-- Run this with no other cc-ai program running.
+local function runTagged()
+  local tagged = url .. "#cc-ai-check"
+  local ok, err = http.request({
+    url = tagged,
+    method = "POST",
+    headers = headers,
+    body = json.encode({ model = model, max_tokens = 1000,
+      messages = { { role = "user", content = "Reply with: ok" } } }),
+    timeout = 0,
+    binary = true,
+  })
+  if not ok then
+    out("tagged URL: refused: " .. tostring(err))
+    return
+  end
+  while true do
+    local event, eventUrl, a, b = os.pullEvent()
+    -- Only this request's reply (others belong to other programs)
+    if (event == "http_success" or event == "http_failure")
+        and (eventUrl == tagged or eventUrl == url) then
+      local h = event == "http_success" and a or b
+      local code = h and h.getResponseCode()
+      if h then h.close() end
+      local reason = event == "http_failure" and (", reason " .. tostring(a)) or ""
+      out(("tagged URL: %s, status %s%s, event URL %s"):format(event, tostring(code), reason,
+        eventUrl == tagged and "matches" or "differs (the fragment was dropped)"))
+      return
+    end
+  end
+end
+
 out("Endpoint: " .. url)
 out("Model: " .. model)
 out("Host: " .. tostring(_HOST))
@@ -126,6 +164,7 @@ run(false, false)
 run(false, true)
 run(true, false)
 run(true, true)
+runTagged()
 
 save("/http-check.txt", table.concat(lines, "\n") .. "\n")
 print("Saved to /http-check.txt")

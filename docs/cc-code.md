@@ -14,7 +14,9 @@ wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 
 ```
 cc-code [options]
-  -m, --model <model>   Set AI model (default: anthropic/claude-sonnet-4)
+  -m, --model <model>   AI model for this run: <provider>:<model> (google,
+                        openai, groq, custom) or a gateway model such as
+                        openai/gpt-4o. Default: the model /model saved
   -t, --terminal        Force terminal mode (line-based, no TUI)
   -c, --monochrome      Use monochrome colors (automatic on non-advanced computers)
   -h, --help            Show help
@@ -45,17 +47,27 @@ print(text)
 | `/help`, `/?` | Show available commands |
 | `/model` | View current model |
 | `/model <provider/model>` | Switch to gateway model |
+| `/model <provider>` | Show how to pick a model for a provider, and its saved model |
 | `/model google <model>` | Use Google directly |
 | `/model openai <model>` | Use OpenAI directly |
 | `/model groq <model>` | Use Groq directly |
-| `/model custom <model>` | Use the OpenAI-compatible endpoint in `AI_CUSTOM_BASE_URL` |
+| `/model custom <model>` | Use the OpenAI-compatible endpoint in `AI_CUSTOM_BASE_URL` (also `/model custom:<model>`) |
 | `/turtle <prompt>` | Ask a turtle programming question with the quick API reference |
 | `/turtle full <prompt>` | Same, with the full API reference (`docs/turtle.md`) |
 | `/clear` | Clear conversation history |
 | `/exit`, `/quit` | Exit cc-code |
 | `!<command>` | Execute shell command directly |
 
-Holding Ctrl+T cancels a request that is in progress. At an empty prompt, it exits cc-code.
+`/model` saves the model it switches to in the `cc-code.model` setting, so the next start uses it. `cc-code -m <model>` overrides it for one run.
+
+While the model works, the status bar shows how long it has been thinking and the tool step, for example `Thinking 1:12 - step 2/25 - Ctrl+T cancels`. You can scroll back meanwhile; new output then leaves your view where it is (Ctrl+End jumps to the bottom).
+
+Holding Ctrl+T cancels a request that is in progress. Tool steps that already finished stay in the conversation (their file changes are on disk anyway), so you can say "continue". At an empty prompt, Ctrl+T exits cc-code.
+
+A turn ends early, with a note, when:
+- it reaches the step limit (`cc-code.max_steps`, default 25 model requests per prompt): type `continue` to go on;
+- the reply is cut off at the output token limit;
+- the model sends an empty reply.
 
 ## Tools
 
@@ -75,7 +87,17 @@ When `glob` or `grep` scan from the root directory, they skip `/rom`.
 
 ### How shell output is captured
 
-CraftOS has no output redirection, so `shell` and `!<command>` run the command with the terminal redirected to an invisible recording terminal, and return what it printed. While the command runs, it can't be seen. A program that waits for keyboard input blocks cc-code until it exits, so hold Ctrl+T to stop it. `cd` persists, as it would at the shell prompt.
+CraftOS has no output redirection, so `shell` and `!<command>` run the command with the terminal redirected to an invisible recording terminal, and return what it printed. While the command runs, it can't be seen. `cd` persists, as it would at the shell prompt.
+
+For the `shell` tool:
+- The recording terminal is 160 columns wide, so long lines aren't wrapped.
+- The model gets the start (1000 bytes) and the end (3000 bytes) of long output, because errors and summaries are printed last.
+- A program still running after its `timeout` (20 seconds by default, at most 300; the model can set it per call) is stopped, as Ctrl+T would stop it, and the output so far is returned. That is normal for programs that loop forever, such as monitor dashboards or farm controllers. A program that has not ended 10 seconds after the stop (it ignores terminate, or its cleanup takes too long) is abandoned: it never runs again. If it had set `os.pullEvent = os.pullEventRaw`, as terminate-proof programs do, that is put back.
+- On advanced computers the model is told to leave long-running programs running with `bg <program>`, which opens them in their own multishell tab.
+
+Holding Ctrl+T while a command runs stops it: the program gets the terminate and can clean up. A second Ctrl+T abandons a program that is still running. During the `shell` tool, Ctrl+T also ends the turn, but the output so far is still reported to the model.
+
+An abandoned program never pops the shell's record of the running program, so for the rest of that shell's session `shell.getRunningProgram()` and the multishell tab title may name the wrong program. Nothing else is affected.
 
 ## Display Modes
 
@@ -111,6 +133,14 @@ API keys are stored as settings with the `set` program. They're saved in `/.sett
 | `AI_CUSTOM_BASE_URL` | Endpoint for `/model custom <model>`, e.g. `https://nano-gpt.com/api/v1` |
 | `AI_CUSTOM_API_KEY` | Key for the custom endpoint (optional) |
 | `ai.http_timeout` | HTTP idle timeout for SDK scripts, 0-60 (default 60). cc-code itself uses none |
+
+### cc-code settings
+
+| Setting | Description |
+|----------|-------------|
+| `cc-code.model` | Model used at startup, e.g. `custom:deepseek/deepseek-v4.1-flash:thinking` or `openai/gpt-4o` (gateway). `/model` sets it |
+| `cc-code.max_steps` | Most model requests (tool steps) per prompt (default 25) |
+| `cc-code.max_output_tokens` | Output token cap per reply. Default: none for the custom provider (thinking models count their reasoning against it), 4096 for the others |
 
 ### Project instructions (.cc-code.md / CLAUDE.md)
 

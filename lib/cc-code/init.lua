@@ -53,6 +53,50 @@ occode.terminal = setmetatable({}, {
   end
 })
 
+-- "m:ss" for a number of seconds. The wait ticks come from 0.5 s timers,
+-- which CC: Tweaked fires on 50 ms server ticks, so a sample can be a little
+-- under the full second: round up from a quarter second short.
+local function formatElapsed(seconds)
+  seconds = math.floor(seconds + 0.25)
+  return string.format("%d:%02d", math.floor(seconds / 60), seconds % 60)
+end
+
+-- Callbacks for agent.process that keep the UI live during a turn: the
+-- status bar shows how long the model has been thinking and the step, and
+-- events that arrive while waiting (scrolling, resizes) reach the UI
+local function turnCallbacks(ui)
+  local step, maxSteps = 1, 1
+
+  local function waitStatus(seconds)
+    local parts = { "Thinking " .. formatElapsed(seconds) }
+    if maxSteps > 1 then
+      parts[#parts + 1] = "step " .. step .. "/" .. maxSteps
+    end
+    parts[#parts + 1] = "Ctrl+T cancels"
+    ui.setStatus(parts)
+  end
+
+  return {
+    onStepStart = function(s, m)
+      step, maxSteps = s, m
+      waitStatus(0)
+    end,
+    onWait = waitStatus,
+    onEvent = function(...)
+      if ui.handleEvent then
+        ui.handleEvent(...)
+      end
+    end,
+    onToolCall = function(name, args)
+      ui.setStatus("Running " .. name .. "...")
+      ui.printToolCall(name, args)
+    end,
+    onToolResult = function(name, result)
+      ui.printToolResult(name, result)
+    end,
+  }
+end
+
 -- Internal run loop (shared between TUI and terminal modes)
 local function runLoop(ui, config)
   -- Initialize agent
@@ -70,6 +114,10 @@ local function runLoop(ui, config)
   ui.print("Welcome to cc-code v" .. occode.version, ui.colors and ui.colors.assistant)
   ui.print("Type /help for available commands.", ui.colors and ui.colors.dim)
   ui.print("Use !<command> to execute shell commands (e.g., !ls)", ui.colors and ui.colors.dim)
+  if agent.state.modelWarning then
+    -- The saved cc-code.model setting is not a model
+    ui.print("cc-code.model: " .. agent.state.modelWarning, ui.colors and ui.colors.error)
+  end
   ui.print("", ui.colors and ui.colors.foreground)
 
   -- Main loop
@@ -90,15 +138,7 @@ local function runLoop(ui, config)
       -- Process input
       ui.setStatus("Thinking...")
 
-      local result = agent.process(input, {
-        onToolCall = function(name, args)
-          ui.setStatus("Running " .. name .. "...")
-          ui.printToolCall(name, args)
-        end,
-        onToolResult = function(name, result)
-          ui.printToolResult(name, result)
-        end,
-      })
+      local result = agent.process(input, turnCallbacks(ui))
 
       -- Handle result
       if result.type == "command" then
@@ -113,8 +153,12 @@ local function runLoop(ui, config)
       elseif result.type == "direct" then
         ui.print(result.text, ui.colors and ui.colors.foreground)
       elseif result.type == "response" then
-        if result.text and result.text ~= "" then
+        if result.text and result.text:find("%S") then
           ui.printRole("assistant", result.text)
+        end
+        -- Why the turn ended early (step limit, cut off, empty reply)
+        if result.notice then
+          ui.print("(" .. result.notice .. ")", ui.colors and ui.colors.dim)
         end
       end
 

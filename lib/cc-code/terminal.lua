@@ -8,6 +8,7 @@
 
 local json = require("cmn-utils.json")
 local cctext = require("cmn-utils.text")
+local aiUtils = require("ai.utils")
 
 -- The CC colour API ("terminal.colors" below is the table of UI roles)
 local ccColors = colors
@@ -142,8 +143,12 @@ function terminal.printToolResult(name, result)
   resetTerminalState()
 end
 
--- Set status (stored only; terminal mode has no status bar)
+-- Set status (stored only; terminal mode has no status bar). A list of
+-- parts is joined.
 function terminal.setStatus(msg)
+  if type(msg) == "table" then
+    msg = table.concat(msg, " - ")
+  end
   state.status = msg or "Ready"
 end
 
@@ -228,11 +233,16 @@ function terminal.readInput()
     end, function()
       -- pullEventRaw: this must survive the terminate
       while true do
-        local _, key = os.pullEventRaw("key")
-        if key == keys.up or key == keys.down then
-          current = nil
-        elseif key == keys.t then
-          sawT = true
+        local event, p1, p2, p3 = os.pullEventRaw()
+        if event == "key" then
+          if p1 == keys.up or p1 == keys.down then
+            current = nil
+          elseif p1 == keys.t then
+            sawT = true
+          end
+        else
+          -- A late reply to a request cancelled with Ctrl+T: close it
+          aiUtils.discardStale(event, p1, p2, p3)
         end
       end
     end)

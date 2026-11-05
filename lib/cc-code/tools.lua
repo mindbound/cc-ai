@@ -10,6 +10,15 @@ local byteLen = require("cmn-utils.text").byteLen
 
 local tools = {}
 
+-- Shell tool limits: seconds a program may run (default and maximum), the
+-- width of the terminal its output is recorded on, and how much output the
+-- model gets (the start and the end: errors and summaries print last)
+tools.SHELL_TIMEOUT = 20
+tools.SHELL_MAX_TIMEOUT = 300
+tools.SHELL_WIDTH = 160
+local SHELL_HEAD_BYTES = 1000
+local SHELL_TAIL_BYTES = 3000
+
 -- Helper: resolve path relative to working directory
 local resolvePath = cmnPath.resolve
 
@@ -289,6 +298,45 @@ tools.grep = ai.tool({
   end,
 })
 
+-- Keep the first headBytes and the last tailBytes of output, cut at line
+-- boundaries (so a multi-byte character is never split). Returns the text
+-- and whether anything was left out. droppedBytes: what the recorder already
+-- dropped from the middle (capture.run's info), counted in the note when
+-- its "[... N lines left out ...]" marker is in the part cut here.
+local function headAndTail(output, headBytes, tailBytes, droppedBytes)
+  local total = byteLen(output)
+  if total <= headBytes + tailBytes then
+    return output, false
+  end
+  -- Head: up to the last newline within headBytes
+  local head = output:sub(1, headBytes)
+  local lastNl = head:match(".*()\n")
+  if lastNl then
+    head = head:sub(1, lastNl - 1)
+  end
+  -- Tail: from the first newline within the last tailBytes
+  local tailStart = total - tailBytes + 1
+  local firstNl = output:find("\n", tailStart, true)
+  if firstNl then
+    tailStart = firstNl + 1
+  end
+  local tail = output:sub(tailStart)
+  -- The cut part starts and ends with a newline (between head and tail)
+  local removed = output:sub(byteLen(head) + 1, tailStart - 1)
+  local _, newlines = removed:gsub("\n", "")
+  local omittedLines = math.max(1, newlines - 1)
+  local omittedBytes = byteLen(removed) - 1
+  local marker = removed:match("\n(%[%.%.%. %d+ lines left out %.%.%.%])\n")
+  if marker then
+    -- That one line stands for the lines the recorder dropped
+    omittedLines = omittedLines - 1 + tonumber(marker:match("(%d+)"))
+    omittedBytes = omittedBytes - byteLen(marker) - 1 + (droppedBytes or 0)
+  end
+  local note = string.format("[... %d lines (%d bytes) left out ...]", omittedLines, omittedBytes)
+  return head .. "\n" .. note .. "\n" .. tail, true
+end
+tools.headAndTail = headAndTail
+
 -- Tool: Shell (execute CraftOS shell command)
 tools.shell = ai.tool({
   name = "shell",
@@ -296,32 +344,70 @@ tools.shell = ai.tool({
     "Programs: ls, cd, cp, mv, rm, mkdir, type, id, label, set, wget, pastebin, gps, peripherals. " ..
     "Run a Lua program by its path, with arguments (e.g. 'hello.lua' or 'mine 3'); there is no 'lua <file>' command. " ..
     "There is no cat, echo or grep: use read_file, write_file and grep. " ..
-    "Never run interactive programs (edit, lua, shell, paint) or programs that wait for input: the agent blocks until they exit.",
+    "A program still running after `timeout` seconds is stopped and its output so far returned: " ..
+    "normal for programs that loop forever. " ..
+    "Never run interactive programs (edit, lua, shell, paint) or programs that wait for input.",
   parameters = {
     type = "object",
     properties = {
       command = { type = "string", description = "The shell command to execute" },
       workdir = { type = "string", description = "Working directory (default: current directory)" },
+      timeout = {
+        type = "number",
+        description = "Seconds before a still-running program is stopped (default " ..
+          tools.SHELL_TIMEOUT .. ", max " .. tools.SHELL_MAX_TIMEOUT .. ")",
+      },
     },
     required = { "command" },
   },
   execute = function(args)
-    local workdir = args.workdir and resolvePath(args.workdir) or nil
-    local success, output, terminated = capture.run(args.command, workdir)
-    if terminated then
-      -- Ctrl+T stops the agent too, not just the program it ran
-      error("Terminated", 0)
+    if type(args.command) ~= "string" or args.command == "" then
+      error("command must be a non-empty string", 0)
     end
+    local workdir = args.workdir and resolvePath(args.workdir) or nil
+    local timeout = tonumber(args.timeout) or tools.SHELL_TIMEOUT
+    timeout = math.max(1, math.min(tools.SHELL_MAX_TIMEOUT, timeout))
+
+    local success, output, terminated, info = capture.run(args.command, workdir, {
+      width = tools.SHELL_WIDTH,
+      timeout = timeout,
+    })
+    info = info or {}
+
+    local truncated
+    output, truncated = headAndTail(output, SHELL_HEAD_BYTES, SHELL_TAIL_BYTES, info.droppedBytes)
     if output == "" then
       output = success and "(no output)" or "(command failed, no output)"
     end
 
-    return {
+    local result = {
       command = args.command,
-      output = output:sub(1, 4000),
+      output = output,
       success = success,
-      truncated = byteLen(output) > 4000,
+      truncated = truncated or nil,
     }
+    if info.timedOut then
+      result.success = nil
+      result.timedOut = true
+    end
+    if info.abandoned then
+      result.note = (info.timedOut and ("Still running after " .. timeout .. "s; it") or "It") ..
+        " did not end after the stop request (it ignores terminate, or its cleanup takes " ..
+        "too long), so it was abandoned and will not run any further."
+      if info.pullEventRestored then
+        result.note = result.note .. " It had set os.pullEvent = os.pullEventRaw; that was put back."
+      end
+    elseif info.timedOut then
+      result.note = "Still running after " .. timeout .. "s, so it was stopped. " ..
+        "That is expected for programs that loop forever."
+    end
+
+    if terminated then
+      -- The user stopped the program with Ctrl+T: that ends the turn too,
+      -- but the output so far is still reported to the model
+      error({ terminated = true, result = result }, 0)
+    end
+    return result
   end,
 })
 

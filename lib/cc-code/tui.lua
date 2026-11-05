@@ -10,6 +10,7 @@
 
 local json = require("cmn-utils.json")
 local cctext = require("cmn-utils.text")
+local aiUtils = require("ai.utils")
 
 local width, csub = cctext.width, cctext.sub
 
@@ -530,19 +531,40 @@ local function drawHeaderBar()
   end
 end
 
+-- The status as one line of at most maxWidth cells. A status given as parts
+-- drops parts from the end until it fits (the first part always stays).
+local function statusText(maxWidth)
+  local parts = state.statusParts
+  if not parts then
+    return truncate(state.status, maxWidth)
+  end
+  for n = #parts, 2, -1 do
+    local candidate = table.concat(parts, " - ", 1, n)
+    if not longerThan(candidate, maxWidth) then
+      return candidate
+    end
+  end
+  return truncate(parts[1] or "", maxWidth)
+end
+
 local function drawStatusBar()
   local y = state.height - 1  -- Status bar is just above input
   if y < 2 then return end
   local c = tui.colors
   fill(1, y, state.width, c.status)
-  put(2, y, state.status, c.dim, c.status)
 
-  -- Show scroll indicator
+  -- Scroll indicator on the right, shortened when it would crowd the status
+  local scrollText
   if state.scrollOffset > 0 then
-    local scrollText = string.format("[Scroll: %d lines up]", state.scrollOffset)
-    if state.width - width(scrollText) - 1 < 2 + width(state.status) + 1 then
+    scrollText = string.format("[Scroll: %d lines up]", state.scrollOffset)
+    if state.width - width(scrollText) - 1 < 2 + width(statusText(state.width)) + 1 then
       scrollText = string.format("[%d up]", state.scrollOffset)
     end
+  end
+
+  local room = state.width - 2 - (scrollText and (width(scrollText) + 2) or 0)
+  put(2, y, statusText(math.max(1, room)), c.dim, c.status)
+  if scrollText then
     put(math.max(1, state.width - width(scrollText) - 1), y, scrollText, c.tool, c.status)
   end
 end
@@ -661,6 +683,7 @@ function tui.init(config)
   state.inputCursor = 0
   state.reading = false
   state.status = "Ready"
+  state.statusParts = nil
   state.showCommandPopup = false
   state.filteredCommands = {}
   state.commandPopupIndex = 1
@@ -682,9 +705,20 @@ function tui.drawStatus()
   draw(drawStatusBar)
 end
 
--- Set status message
+-- Set status message: a string, or a list of parts ("Thinking 0:12",
+-- "step 2/25", ...) that are joined and dropped from the end to fit
 function tui.setStatus(msg)
-  state.status = cctext.forDisplay(tostring(msg or "Ready"))
+  if type(msg) == "table" then
+    local parts = {}
+    for i, part in ipairs(msg) do
+      parts[i] = cctext.forDisplay(tostring(part))
+    end
+    state.statusParts = parts
+    state.status = parts[1] or ""
+  else
+    state.statusParts = nil
+    state.status = cctext.forDisplay(tostring(msg or "Ready"))
+  end
   tui.drawStatus()
 end
 
@@ -711,11 +745,18 @@ function tui.drawInput()
   draw(drawInputLine)
 end
 
+-- New content keeps the view where it is: at the bottom it follows the new
+-- lines; scrolled back (reading), the same lines stay on screen
+local function keepView(addedLines)
+  if state.scrollOffset > 0 then
+    state.scrollOffset = state.scrollOffset + addedLines
+  end
+end
+
 -- Print message to content area
 function tui.print(msg, color)
-  addMessage(cctext.forDisplay(tostring(msg)), color or tui.colors.foreground)
-  -- Auto-scroll to bottom when new content is added
-  state.scrollOffset = 0
+  local m = addMessage(cctext.forDisplay(tostring(msg)), color or tui.colors.foreground)
+  keepView(m.lines)
   tui.redrawContent()
 end
 
@@ -739,6 +780,10 @@ function tui.printRole(role, msg)
     prefix = ""
   end
 
+  if role == "user" then
+    -- The user just sent this: show it and what follows
+    state.scrollOffset = 0
+  end
   tui.print(prefix .. tostring(msg), color)
 end
 
@@ -751,7 +796,7 @@ function tui.printToolCall(name, args)
     if longerThan(argsStr, 100) then
       argsStr = csub(argsStr, 1, 97) .. "..."
     end
-    addMessage("   " .. argsStr, tui.colors.dim)
+    keepView(addMessage("   " .. argsStr, tui.colors.dim).lines)
     tui.redrawContent()
   end
 end
@@ -763,8 +808,7 @@ function tui.printToolResult(name, result)
   if longerThan(resultStr, 200) then
     resultStr = csub(resultStr, 1, 197) .. "..."
   end
-  addMessage("<< " .. resultStr, tui.colors.dim)
-  state.scrollOffset = 0
+  keepView(addMessage("<< " .. resultStr, tui.colors.dim).lines)
   tui.redrawContent()
 end
 
@@ -792,6 +836,43 @@ function tui.scrollToTop()
   local _, _, _, h = getContentBounds()
   state.scrollOffset = math.max(0, #state.history - h)
   tui.redrawContent()
+end
+
+-- Handle an event that arrived while cc-code is busy (waiting for the
+-- model): scrolling and resizes work; typing waits for the prompt
+function tui.handleEvent(event, p1)
+  if not win then return end
+  if event == "mouse_scroll" then
+    if p1 == -1 then
+      tui.scrollUp(3)
+    elseif p1 == 1 then
+      tui.scrollDown(3)
+    end
+  elseif event == "key" then
+    if p1 == keys.leftCtrl or p1 == keys.rightCtrl then
+      state.ctrlHeld[p1] = true
+    elseif p1 == keys.pageUp then
+      tui.scrollUp(5)
+    elseif p1 == keys.pageDown then
+      tui.scrollDown(5)
+    elseif isCtrlDown() then
+      if p1 == keys.up then
+        tui.scrollUp(1)
+      elseif p1 == keys.down then
+        tui.scrollDown(1)
+      elseif p1 == keys.home then
+        tui.scrollToTop()
+      elseif p1 == keys["end"] then
+        tui.scrollToBottom()
+      end
+    end
+  elseif event == "key_up" then
+    if p1 == keys.leftCtrl or p1 == keys.rightCtrl then
+      state.ctrlHeld[p1] = nil
+    end
+  elseif event == "term_resize" or event == "monitor_resize" then
+    checkSize()
+  end
 end
 
 ---------------------------------------------------------------------------
@@ -1077,11 +1158,14 @@ function tui.readInput()
   end)
 
   while true do
-    local ev, p1 = os.pullEventRaw()
+    local ev, p1, p2, p3 = os.pullEventRaw()
     local hadPopup = state.showCommandPopup
     local changed = false
 
-    if ev == "terminate" then
+    if aiUtils.discardStale(ev, p1, p2, p3) then
+      -- A late reply to a request cancelled with Ctrl+T: closed unread
+
+    elseif ev == "terminate" then
       if state.inputBuffer ~= "" then
         -- Ctrl+T with text: clear the line and keep reading
         resetInput()
@@ -1155,6 +1239,7 @@ function tui.streamText(chunk)
   local msg = state.messages[#state.messages]
   if not (msg and msg.streaming) then
     msg = addMessage("", tui.colors.assistant)
+    keepView(msg.lines)
     msg.streaming = true
     msg.pending = ""
   end
@@ -1179,14 +1264,14 @@ function tui.streamText(chunk)
   msg.text = msg.text .. cctext.forDisplay(raw)
 
   -- Re-wrap this message
+  local before = msg.lines
   for _ = 1, msg.lines do
     state.history[#state.history] = nil
   end
   local _, _, w = getContentBounds()
   msg.lines = wrapMessage(msg, w)
 
-  -- Auto-scroll to bottom during streaming
-  state.scrollOffset = 0
+  keepView(msg.lines - before)
   tui.redrawContent()
 end
 
@@ -1198,11 +1283,13 @@ function tui.endStream()
     if msg.pending ~= "" then
       msg.text = msg.text .. cctext.forDisplay(msg.pending)
       msg.pending = ""
+      local before = msg.lines
       for _ = 1, msg.lines do
         state.history[#state.history] = nil
       end
       local _, _, w = getContentBounds()
       msg.lines = wrapMessage(msg, w)
+      keepView(msg.lines - before)
       tui.redrawContent()
     end
   end

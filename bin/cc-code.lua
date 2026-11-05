@@ -1,6 +1,9 @@
 -- cc-code: AI Coding Agent for ComputerCraft
 -- Usage: cc-code [options]
---   -m, --model <model>   Set the AI model (default: anthropic/claude-sonnet-4)
+--   -m, --model <model>   Set the AI model for this run: <provider>:<model>
+--                         (google, openai, groq, custom) or a gateway model
+--                         like openai/gpt-4o. Default: the cc-code.model
+--                         setting, which /model saves
 --   -t, --terminal        Force terminal mode (line-based, no TUI)
 --   -c, --monochrome      Use monochrome colors (auto on non-advanced computers)
 --   -h, --help            Show this help message
@@ -38,7 +41,8 @@ if opts.help then
   print("cc-code - AI Coding Agent for ComputerCraft")
   print("")
   print("Usage: cc-code [options]")
-  print("  -m, --model <model>   Set the AI model")
+  print("  -m, --model <model>   Model for this run, e.g.")
+  print("                        custom:<model> or openai/gpt-4o")
   print("  -t, --terminal        Force terminal mode (no TUI)")
   print("  -c, --monochrome      Use monochrome colors")
   print("  -h, --help            Show this help message")
@@ -48,14 +52,30 @@ if opts.help then
   print("  set GOOGLE_GENERATIVE_AI_API_KEY <key>")
   print("  set OPENAI_API_KEY <key>")
   print("  set GROQ_API_KEY <key>")
+  print("  set AI_CUSTOM_BASE_URL <url>  (custom endpoint)")
+  print("")
+  print("Settings: cc-code.model (saved by /model),")
+  print("  cc-code.max_steps, cc-code.max_output_tokens")
   print("")
   print("Inside cc-code: /help, /model, /clear, /exit")
   return
 end
 
 if opts.model == "" then
-  printError("--model needs a value, e.g. -m google/gemini-2.5-flash")
+  printError("--model needs a value, e.g. -m custom:<model> or -m google/gemini-2.5-flash")
   return
+end
+
+-- An unknown model is an error here, rather than a silent fallback
+if opts.model then
+  local ok, agent = pcall(require, "cc-code.agent")
+  if ok then
+    local model, problem = agent.resolveModel(opts.model)
+    if not model then
+      printError("Unknown model: " .. problem)
+      return
+    end
+  end
 end
 
 -- Build config

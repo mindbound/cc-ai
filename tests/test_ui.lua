@@ -49,6 +49,8 @@ return function(T)
   -- a table is queued as an event, a function is called with the window
   -- (for assertions)
   local function runUI(w, h, config, steps)
+    -- A model saved by an earlier /model test would replace the default
+    settings.unset("cc-code.model")
     local win = window.create(term.current(), 1, 1, w, h, false)
     -- A custom palette, which cc-code must restore on exit
     win.setPaletteColour(colours.black, 0x123456)
@@ -151,6 +153,29 @@ return function(T)
     expectPalette(win, paletteBefore)
     T.eq(#mock.requests, 2)
     T.eq(capture.hooks, nil, "capture hooks cleared on exit")
+  end)
+
+  T.test("TUI: the status shows the wait, and scrolling works while waiting", function()
+    mock.reset()
+    mock.push({ hold = true, body = chat("Finally done") })
+    runUI(51, 19, {}, {
+      "/help", "enter",
+      "slow question", "enter",
+      expectScreen("Thinking 0:00 - step 1/25 - Ctrl+T cancels"),
+      function() sleep(1.6) end,
+      expectScreen("Thinking 0:01"),
+      "pageUp",
+      expectScreen("up]"),
+      function(win)
+        T.ok(not screen(win):find("> slow question", 1, true), "scrolled back over the question")
+        mock.release()
+      end,
+      function() sleep(0.2) end,
+      expectScreen("Ready"),
+      { "key", keys.leftCtrl, false }, "end",
+      expectScreen("Finally done"),
+      "/exit", "enter",
+    })
   end)
 
   T.test("TUI: /help is shown, history recalls the previous input", function()

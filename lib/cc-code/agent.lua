@@ -15,11 +15,41 @@ local agent = {}
 -- the built-in skills wherever cc-ai is installed
 local moduleDir = (debug.getinfo(1, "S").source or ""):match("^@(.*)/agent%.lua$")
 
--- Default configuration
+-- Defaults used when neither the config nor a setting gives a value
+local DEFAULT_MODEL = "anthropic/claude-sonnet-4"
+local DEFAULT_MAX_STEPS = 25
+-- Output token cap for providers that need one. The custom provider sends
+-- none by default: thinking models count their reasoning against it.
+local DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
+-- Settings (shown and changed with the `set` program)
+local SETTINGS = {
+  model = "cc-code.model",
+  maxSteps = "cc-code.max_steps",
+  maxOutputTokens = "cc-code.max_output_tokens",
+}
+
+if settings and settings.define then
+  pcall(settings.define, SETTINGS.model, {
+    description = "cc-code's model, e.g. custom:<model id> or creator/model for the AI Gateway",
+    type = "string",
+  })
+  pcall(settings.define, SETTINGS.maxSteps, {
+    description = "cc-code: most model requests (tool steps) per prompt",
+    type = "number",
+  })
+  pcall(settings.define, SETTINGS.maxOutputTokens, {
+    description = "cc-code: output token cap per reply (default: none for custom, 4096 for others)",
+    type = "number",
+  })
+end
+
+-- Default configuration (init fills in model, maxSteps and maxOutputTokens
+-- from the config passed to it, then from settings)
 agent.config = {
-  model = "anthropic/claude-sonnet-4",
-  maxSteps = 10,
-  maxOutputTokens = 4096,
+  model = DEFAULT_MODEL,
+  maxSteps = DEFAULT_MAX_STEPS,
+  maxOutputTokens = nil,
   temperature = 0.7,
   systemPrompt = nil,
   -- HTTP idle timeout in seconds. 0 = none: a non-streaming reply sends
@@ -27,6 +57,49 @@ agent.config = {
   -- which long answers can exceed. Hold Ctrl+T to cancel instead.
   timeout = 0,
 }
+
+-- A positive whole number from a setting, or nil
+local function numberSetting(name)
+  local value = settings and tonumber(settings.get(name))
+  if value and value >= 1 then
+    return math.floor(value)
+  end
+  return nil
+end
+
+-- Turn a model spec into a model: "custom:<id>" etc. (see ai.resolveModel)
+-- or a gateway "creator/model" string. Returns nil and a message when the
+-- spec is not a model (e.g. a bare provider name such as "custom").
+function agent.resolveModel(spec)
+  local ok, model = pcall(ai.resolveModel, spec)
+  if ok and (type(model) == "table" or (type(model) == "string" and model:find("/", 1, true))) then
+    return model
+  end
+  return nil, "'" .. tostring(spec) .. "' is not a model (use custom:<model>, " ..
+    "google:<model> and so on, or creator/model for the AI Gateway)"
+end
+
+-- Save the model as the default for later runs (cc-code.model)
+function agent.saveModel(model)
+  if not settings then return end
+  settings.set(SETTINGS.model, ai.modelSpec(model))
+  pcall(settings.save)
+end
+
+-- The output token cap to send for a model (nil = none)
+local function outputTokenCap(model)
+  if agent.config.maxOutputTokens then
+    return agent.config.maxOutputTokens
+  end
+  local fromSetting = numberSetting(SETTINGS.maxOutputTokens)
+  if fromSetting then
+    return fromSetting
+  end
+  if type(model) == "table" and model.provider == "custom" then
+    return nil
+  end
+  return DEFAULT_MAX_OUTPUT_TOKENS
+end
 
 -- Convert every string in a tool result to UTF-8 (file contents, shell
 -- output and names on the computer are CC charset; JSON must be UTF-8)
@@ -100,6 +173,9 @@ You have: read_file, write_file, edit_file, list_directory, glob, grep, shell.
 - Find files with glob and search content with grep instead of chains of shell ls calls
 - shell runs CraftOS commands (ls, cp, mv, rm, mkdir, or a program path) and captures what they print; there is no cat/echo/grep, so prefer the file tools when one fits
 - Verify your work: after writing a program, run it by its path via shell and check the output; fix errors before declaring done. Never run interactive programs (edit, lua, paint) or ones that wait for user input
+- shell stops a program that is still running after its `timeout` (seconds; default ]] .. tools.SHELL_TIMEOUT .. [[, max ]] .. tools.SHELL_MAX_TIMEOUT .. [[). Programs that loop forever (monitor dashboards, servers, farm or redstone controllers) end that way, which is expected: test them with a short timeout. Give long turtle jobs a longer one]] ..
+  (multishell and "\n- To leave a program running after testing it, start it with the shell command `bg <program> [args]`: it runs in its own multishell tab" or "") .. [[
+
 
 ## Writing Lua for this system
 - Match repo style: 2-space indent, double quotes, `local` everything, modules return a table
@@ -165,10 +241,34 @@ end
 
 -- Initialize agent
 function agent.init(config)
-  if config then
-    for k, v in pairs(config) do
-      agent.config[k] = v
+  config = config or {}
+  agent.config.model = DEFAULT_MODEL
+  agent.config.maxSteps = DEFAULT_MAX_STEPS
+  agent.config.maxOutputTokens = nil
+  for k, v in pairs(config) do
+    agent.config[k] = v
+  end
+
+  -- Settings fill in what the config left out. The model may be a spec
+  -- string ("custom:<id>"). One that is not a model (a gateway model is
+  -- always "creator/model") falls back to the default, with a warning the
+  -- UI shows at startup.
+  agent.state.modelWarning = nil
+  if config.model == nil and settings then
+    local saved = settings.get(SETTINGS.model)
+    if type(saved) == "string" and saved ~= "" then
+      agent.config.model = saved
     end
+  end
+  local model, problem = agent.resolveModel(agent.config.model)
+  if model then
+    agent.config.model = model
+  else
+    agent.state.modelWarning = problem .. "; using " .. DEFAULT_MODEL
+    agent.config.model = DEFAULT_MODEL
+  end
+  if config.maxSteps == nil then
+    agent.config.maxSteps = numberSetting(SETTINGS.maxSteps) or DEFAULT_MAX_STEPS
   end
 
   agent.state.workingDirectory = cmnPath.cwd()
@@ -229,7 +329,11 @@ local function checkApiKey(model)
   return true
 end
 
--- Process a user message
+-- Process a user message. Optional callbacks:
+--   onToolCall(name, args), onToolResult(name, result)
+--   onStepStart(step, maxSteps)  before each model request
+--   onWait(seconds)              about twice a second while waiting for the model
+--   onEvent(event, ...)          other events that arrive while waiting
 function agent.process(input, callbacks)
   callbacks = callbacks or {}
   local onToolCall = callbacks.onToolCall
@@ -243,10 +347,13 @@ function agent.process(input, callbacks)
     end
 
     -- Execute shell command, capturing what it prints
-    local success, output, terminated = capture.run(command)
+    local success, output, terminated, info = capture.run(command)
     agent.state.workingDirectory = cmnPath.cwd() -- `cd` may have changed it
 
-    if terminated then
+    if info and info.abandoned then
+      output = output .. (output ~= "" and "\n" or "") ..
+        "(it did not end after Ctrl+T, so it was abandoned)"
+    elseif terminated then
       output = output .. (output ~= "" and "\n" or "") .. "(stopped with Ctrl+T)"
     end
     if output == "" then
@@ -321,6 +428,13 @@ function agent.process(input, callbacks)
     }
   end
 
+  -- The history is valid for the next request after each completed step
+  -- (every tool call has its result); an error trims back to that point
+  local consistentLength = messageSnapshot
+  -- Whether Ctrl+T stopped one of the last step's tools (that step is kept
+  -- with its partial and skipped results, but it did not complete)
+  local stoppedStep = false
+
   -- Build options
   local opts = {
     model = agent.config.model,
@@ -328,9 +442,16 @@ function agent.process(input, callbacks)
     system = buildSystemPrompt(),
     tools = getAllTools(),
     maxSteps = agent.config.maxSteps,
-    maxOutputTokens = agent.config.maxOutputTokens,
+    maxOutputTokens = outputTokenCap(agent.config.model),
     temperature = agent.config.temperature,
     timeout = agent.config.timeout,
+    onStepStart = callbacks.onStepStart,
+    onWait = callbacks.onWait,
+    onEvent = callbacks.onEvent,
+    onStepFinish = function(info)
+      consistentLength = #agent.state.messages
+      stoppedStep = info and info.cancelled or false
+    end,
   }
 
   -- Use non-streaming mode
@@ -360,7 +481,15 @@ function agent.process(input, callbacks)
         if onToolCall then
           onToolCall(tool["function"].name, args)
         end
-        local result = toUtf8Deep(origExecute(args))
+        local ok, result = pcall(origExecute, args)
+        if not ok then
+          -- A Ctrl+T cancel may carry a partial result (CC charset too)
+          if type(result) == "table" and result.terminated then
+            result.result = toUtf8Deep(result.result)
+          end
+          error(result, 0)
+        end
+        result = toUtf8Deep(result)
         if onToolResult then
           onToolResult(tool["function"].name, result)
         end
@@ -381,16 +510,45 @@ function agent.process(input, callbacks)
 
   -- Handle errors from API calls
   if not success then
-    -- Trim everything added this turn (user message plus any tool-call/result
-    -- messages the tool loop appended before failing)
-    while #agent.state.messages > messageSnapshot do
-      table.remove(agent.state.messages)
-    end
-
+    local cancelled = err == "Terminated"
     local errorMsg = tostring(err)
 
-    -- Check if it's an API key error
-    if errorMsg == "Terminated" then
+    -- Trim back to the last completed step. When no step completed, the
+    -- user message goes too (it can be sent again); otherwise the steps stay
+    -- (their file changes are on disk) and a note ends the turn, so the
+    -- model knows what happened if the user says "continue".
+    local keep = consistentLength > messageSnapshot and consistentLength or messageSnapshot
+    while #agent.state.messages > keep do
+      table.remove(agent.state.messages)
+    end
+    -- Completed steps kept (a step stopped by Ctrl+T is kept but not counted)
+    local keptSteps = 0
+    local keptStopped = keep > messageSnapshot and stoppedStep
+    if keep > messageSnapshot then
+      for i = messageSnapshot + 1, keep do
+        local msg = agent.state.messages[i]
+        if msg.role == "assistant" or msg.role == "model" then
+          keptSteps = keptSteps + 1
+        end
+      end
+      if keptStopped then
+        keptSteps = keptSteps - 1
+      end
+      local note
+      if keptStopped then
+        note = "[The user cancelled this turn with Ctrl+T during the last tool step; " ..
+          "its stopped and skipped calls are marked in their results" ..
+          (keptSteps > 0 and "; the tool steps before it were completed" or "") .. ".]"
+      elseif cancelled then
+        note = "[The user cancelled this turn with Ctrl+T. The tool steps above were completed.]"
+      else
+        note = "[This turn stopped with an error: " .. text.fromCC(errorMsg) ..
+          ". The tool steps above were completed.]"
+      end
+      table.insert(agent.state.messages, { role = "assistant", content = note })
+    end
+
+    if cancelled then
       errorMsg = "Request cancelled (Ctrl+T)."
     else
       for _, keyName in ipairs({ "OPENAI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GROQ_API_KEY", "AI_GATEWAY_API_KEY" }) do
@@ -403,24 +561,57 @@ function agent.process(input, callbacks)
       end
     end
 
+    if keptSteps > 0 then
+      errorMsg = errorMsg .. "\n" .. (keptSteps == 1 and "The completed tool step was kept."
+        or ("The " .. keptSteps .. " completed tool steps were kept."))
+    end
+    if keptStopped then
+      errorMsg = errorMsg .. "\nThe stopped step was kept with its output so far."
+    end
+
     return {
       type = "error",
       text = errorMsg,
-      error = "api_call_failed",
+      error = cancelled and "cancelled" or "api_call_failed",
+      keptSteps = keptSteps,
+      keptStoppedStep = keptStopped or nil,
     }
   end
 
-  -- Add assistant response to history
-  if result and result.text then
-    table.insert(agent.state.messages, { role = "assistant", content = result.text })
+  -- Add the reply to the history. It is never left empty (strict APIs
+  -- reject empty assistant messages), and a note says why a turn ended
+  -- early, so the model knows what happened if the user says "continue".
+  local replyText = result.text or ""
+  local notice
+  if result.stepLimitReached then
+    -- The last step's text is already in the history with its tool calls
+    notice = "Stopped after " .. result.steps .. " tool steps (the limit). Type 'continue' to go on."
+    table.insert(agent.state.messages, {
+      role = "assistant",
+      content = "[Stopped after " .. result.steps .. " tool steps, the limit for one prompt. " ..
+        "The user can say 'continue'.]",
+    })
+  else
+    local content = replyText
+    if result.finishReason == "length" then
+      notice = "The reply was cut off at the output token limit."
+      content = content .. (content ~= "" and "\n" or "") .. "[cut off at the output token limit]"
+    elseif not replyText:find("%S") then
+      notice = "The model sent an empty reply."
+      content = "[empty reply]"
+    end
+    table.insert(agent.state.messages, { role = "assistant", content = content })
   end
 
   return {
     type = "response",
-    text = result and result.text or "",
-    finishReason = result and result.finishReason,
-    toolResults = result and result.toolResults,
-    usage = result and result.usage,
+    text = replyText,
+    notice = notice,
+    finishReason = result.finishReason,
+    stepLimitReached = result.stepLimitReached,
+    steps = result.steps,
+    toolResults = result.toolResults,
+    usage = result.usage,
   }
 end
 
