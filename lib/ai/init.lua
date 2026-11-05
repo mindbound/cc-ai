@@ -102,51 +102,85 @@ local function executeTool(tool, args)
   return { error = "No execute function" }
 end
 
--- Decode a tool call's arguments. Missing or blank arguments mean "no
--- arguments" ({}); returns nil when they are not valid JSON (usually a
--- reply cut off at the output token limit).
+-- Decode a tool call's arguments (a JSON string, or a table from a server
+-- that sends them decoded). Missing or blank arguments, and JSON that is
+-- not an object (a list, a number, ...), mean "no arguments" ({}); returns
+-- nil when they are not valid JSON (usually a reply cut off at the output
+-- token limit). The second value is the arguments as they go back in the
+-- history: a JSON object text, as strict servers reject anything else
+-- ("{}" for none, or for broken ones: rxi json would write {} as []).
 local function decodeArguments(raw)
-  if type(raw) == "table" then
-    return raw
+  local args = raw
+  if type(raw) == "string" and raw:find("%S") then
+    local ok
+    ok, args = pcall(json.decode, raw)
+    if not ok then
+      return nil, "{}"
+    end
   end
-  if raw == nil or not tostring(raw):find("%S") then
-    return {}
+  -- A decoded JSON object has only string keys, a list only number keys
+  -- (also a list that starts with null, which has no [1])
+  if type(args) ~= "table" or type(next(args)) == "number" then
+    return {}, "{}"
   end
-  local ok, args = pcall(json.decode, raw)
-  if not ok then
-    return nil
+  if next(args) == nil then
+    return args, "{}"
   end
-  if type(args) ~= "table" then
-    return {}
+  if type(raw) == "string" then
+    return args, raw
   end
-  return args
+  local ok, text = pcall(json.encode, args)
+  return args, ok and text or "{}"
 end
+
+-- The result of the last tool call of a reply that was cut off (see
+-- runToolCalls), by finish reason
+local CUT_OFF = {
+  incomplete = "The reply ended early (the server stopped sending), so this call " ..
+    "was cut off and did not run; send it again.",
+  length = "The reply hit the output token limit, so this call was cut off and " ..
+    "did not run; send it again in smaller parts (write large files in several " ..
+    "smaller write_file/edit_file calls).",
+}
 
 -- Run one step's tool calls and add their results to messages. Returns the
 -- cancel value when the user pressed Ctrl+T in a tool: the remaining calls
 -- are skipped, and every call still gets a result, so the messages stay
 -- valid for the next request.
+-- When the reply was cut off (finishReason "incomplete": the stream
+-- stopped without [DONE] or a finish reason; or "length": the output token
+-- limit), its last call may be cut off too: with blank or broken arguments
+-- it does not run. (Earlier calls were complete before the next one
+-- started.)
 local function runToolCalls(model, tools, messages, parsed, allToolResults)
   local parts = {}
   local cancel
-  for _, toolCall in ipairs(parsed.toolCalls) do
+  local incomplete = parsed.finishReason == "incomplete"
+  local cutMessage = CUT_OFF[parsed.finishReason]
+  local count = #parsed.toolCalls
+  for i, toolCall in ipairs(parsed.toolCalls) do
     local fn = toolCall["function"] or {}
     local name = fn.name
-    local args = decodeArguments(fn.arguments)
-    if not args or (type(fn.arguments) == "string" and not fn.arguments:find("%S")) then
-      -- Don't send broken or blank JSON back with later requests (strict
-      -- servers reject the whole history), also when the call is skipped
-      fn.arguments = "{}"
-    end
+    local blank = fn.arguments == nil or (type(fn.arguments) == "string" and not fn.arguments:find("%S"))
+    local args, sendBack = decodeArguments(fn.arguments)
+    local cutOff = cutMessage and i == count and (blank or not args)
+    -- Don't send broken, blank or non-object arguments back with later
+    -- requests (strict servers reject the whole history), also when the
+    -- call is skipped
+    fn.arguments = sendBack
     local result
 
     if cancel then
       result = { error = "Skipped: the user cancelled the turn (Ctrl+T)." }
+    elseif cutOff then
+      result = { error = cutMessage }
     elseif not args then
       local msg = "The arguments were not valid JSON, so the tool did not run."
       if parsed.finishReason == "length" then
         msg = msg .. " The reply hit the output token limit: write large files " ..
           "in several smaller write_file/edit_file calls."
+      elseif incomplete then
+        msg = msg .. " The reply ended early (the server stopped sending); send the call again."
       end
       result = { error = msg }
     else

@@ -1,13 +1,16 @@
 # Run the offline cc-ai test suite in headless CraftOS-PC.
-# Usage: .\tests\run.ps1 [-Suite test_ai] [-Emulator path\to\CraftOS-PC_console.exe]
+# Usage: .\tests\run.ps1 [-Suite test_ai] [-Emulator path\to\CraftOS-PC_console.exe] [-Data dir]
+# -Data: the emulator's data directory (default: cc-ai-test-data in TEMP).
+# Give each run that may overlap another its own.
 param(
   [string]$Suite = "",
-  [string]$Emulator = "CraftOS-PC_console.exe"
+  [string]$Emulator = "CraftOS-PC_console.exe",
+  [string]$Data = ""
 )
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-$data = Join-Path ([System.IO.Path]::GetTempPath()) "cc-ai-test-data"
+$data = if ($Data -ne "") { $Data } else { Join-Path ([System.IO.Path]::GetTempPath()) "cc-ai-test-data" }
 $results = Join-Path $data "computer\0\cc-ai-test-results.txt"
 
 New-Item -ItemType Directory -Force $data | Out-Null

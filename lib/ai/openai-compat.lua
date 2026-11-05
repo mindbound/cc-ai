@@ -20,17 +20,27 @@ local function buildMessages(opts)
   return messages
 end
 
+-- Whether a decoded reply (or stream event) is an error object
+local function hasError(data)
+  if type(data) ~= "table" then return false end
+  local e = data.error
+  return e ~= nil and e ~= false and e ~= ""
+end
+
+-- A tool without arguments (no parameters, or no properties) is sent
+-- without "parameters": see utils.toolParameters
 local function buildTools(tools)
   if not tools then return nil end
   local result = {}
   for _, tool in ipairs(tools) do
-    if tool.type == "function" then
+    if type(tool) == "table" and tool.type == "function" and type(tool["function"]) == "table" then
+      local fn = tool["function"]
       table.insert(result, {
         type = "function",
         ["function"] = {
-          name = tool["function"].name,
-          description = tool["function"].description,
-          parameters = tool["function"].parameters,
+          name = fn.name,
+          description = fn.description,
+          parameters = utils.toolParameters(fn.parameters),
         },
       })
     end
@@ -39,21 +49,24 @@ local function buildTools(tools)
 end
 
 local function parseResponse(response)
-  local choice = response.choices and response.choices[1]
-  if not choice then
-    error("No choices in response")
+  local choice = type(response) == "table" and type(response.choices) == "table" and response.choices[1]
+  if type(choice) ~= "table" then
+    error("No choices in the reply.", 0)
   end
 
   local message = choice.message
+  if type(message) ~= "table" then
+    error("The reply's first choice has no message.", 0)
+  end
   local usage = {}
-  if response.usage then
+  if type(response.usage) == "table" then
     usage.inputTokens = response.usage.prompt_tokens
     usage.outputTokens = response.usage.completion_tokens
     usage.totalTokens = response.usage.total_tokens
   end
 
   return {
-    text = message.content or "",
+    text = utils.contentText(message.content),
     finishReason = choice.finish_reason,
     toolCalls = message.tool_calls,
     usage = usage,
@@ -135,8 +148,8 @@ local function createLanguageModel(modelId, config)
     local responseText = utils.httpPost(url, headers, bodyJson, opts.timeout, utils.waitHooks(opts))
     local responseData = utils.decodeJSON(responseText)
 
-    if responseData.error then
-      error(responseData.error.message or json.encode(responseData.error), 0)
+    if hasError(responseData) then
+      error(utils.errorMessage(responseData, responseText), 0)
     end
 
     return parseResponse(responseData), responseData
@@ -219,54 +232,119 @@ local function createLanguageModel(modelId, config)
     local toolCalls = {}
     local usage = {}
     local buffer = ""
+    -- Whether the reply is an event stream at all, and whether it ended
+    -- properly ([DONE] or a finish reason). Lines before the first "data:"
+    -- are kept: a server that ignores stream=true sends plain JSON, and a
+    -- wrong base URL often gives an HTML page. Comment and field lines
+    -- (":", "event:", "id:", "retry:") show that it is an event stream
+    -- even when no data follows (keep-alives while a request is queued).
+    local sawData, sawEnd, sawSSE = false, false, false
+    local otherLines = {}
+    -- The current event's name from an "event:" line (until a blank line)
+    local eventName
 
     local function handleLine(line)
-      if line == "" then return end
-      local eventType, data = utils.parseSSELine(line)
-      if eventType == "data" and data then
-        if data.error then
-          local e = data.error
-          error(type(e) == "table" and (e.message or json.encode(e)) or tostring(e), 0)
+      line = line:gsub("\r$", "")
+      if line == "" then
+        eventName = nil
+        return
+      end
+      -- An error sent as a line of its own ("error: {...}", as llama.cpp's
+      -- server did), before or after the data
+      local errorText = line:match("^error:%s?(.*)$")
+      if errorText then
+        local ok, decoded = pcall(json.decode, errorText)
+        error(utils.errorMessage(ok and decoded or nil, errorText), 0)
+      end
+      if line:find("^:") or line:find("^id:") or line:find("^retry:") then
+        sawSSE = true
+        return
+      end
+      local name = line:match("^event:%s?(.-)%s*$")
+      if name then
+        sawSSE = true
+        eventName = name
+        return
+      end
+      if not sawData then
+        if line:find("^data:") then
+          sawData = true
+          otherLines = nil
+        else
+          otherLines[#otherLines + 1] = line
+          return
         end
-        if type(data.usage) == "table" then
-          usage.inputTokens = data.usage.prompt_tokens
-          usage.outputTokens = data.usage.completion_tokens
-          usage.totalTokens = data.usage.total_tokens
+      end
+      local eventType, data, payload = utils.parseSSELine(line)
+      if eventType == "done" then
+        sawEnd = true
+        return
+      end
+      -- "event: error": the data is the error, with or without an "error" key
+      if eventName == "error" and payload then
+        error(utils.errorMessage(data, payload), 0)
+      end
+      if eventType ~= "data" or type(data) ~= "table" then
+        return
+      end
+      if hasError(data) then
+        error(utils.errorMessage(data, payload), 0)
+      end
+      if type(data.usage) == "table" then
+        usage.inputTokens = data.usage.prompt_tokens
+        usage.outputTokens = data.usage.completion_tokens
+        usage.totalTokens = data.usage.total_tokens
+      end
+      local choice = type(data.choices) == "table" and data.choices[1]
+      if type(choice) ~= "table" then
+        return
+      end
+      local delta = type(choice.delta) == "table" and choice.delta or {}
+      local text = utils.contentText(delta.content)
+      if text ~= "" then
+        fullText = fullText .. text
+        if onChunk then
+          onChunk({ type = "text", text = text })
         end
-        local choice = data.choices and data.choices[1]
-        if choice then
-          local delta = choice.delta
-          if delta and delta.content then
-            fullText = fullText .. delta.content
-            if onChunk then
-              onChunk({ type = "text", text = delta.content })
+      end
+      if type(delta.tool_calls) == "table" then
+        for _, tc in ipairs(delta.tool_calls) do
+          if type(tc) == "table" then
+            local idx = (tonumber(tc.index) or 0) + 1
+            if not toolCalls[idx] then
+              toolCalls[idx] = {
+                type = "function",
+                ["function"] = { name = "", arguments = "" },
+              }
+            end
+            local call = toolCalls[idx]
+            if type(tc.id) == "string" and tc.id ~= "" then call.id = tc.id end
+            local fn = tc["function"]
+            if type(fn) == "table" then
+              if type(fn.name) == "string" then
+                call["function"].name = call["function"].name .. fn.name
+              end
+              local args = fn.arguments
+              if type(args) == "table" then
+                -- Some servers send the arguments decoded. rxi json
+                -- would write empty arguments as [], which is no object.
+                -- (A table rxi can't encode, such as a list with holes,
+                -- counts as no arguments.)
+                local ok, text = pcall(json.encode, args)
+                args = (ok and next(args) ~= nil) and text or "{}"
+              end
+              if type(args) == "string" then
+                call["function"].arguments = call["function"].arguments .. args
+              end
             end
           end
-          if delta and delta.tool_calls then
-            for _, tc in ipairs(delta.tool_calls) do
-              local idx = (tc.index or 0) + 1
-              if not toolCalls[idx] then
-                toolCalls[idx] = {
-                  id = tc.id,
-                  type = "function",
-                  ["function"] = { name = "", arguments = "" },
-                }
-              end
-              if tc.id then toolCalls[idx].id = tc.id end
-              if tc["function"] then
-                if tc["function"].name then
-                  toolCalls[idx]["function"].name = toolCalls[idx]["function"].name .. tc["function"].name
-                end
-                if tc["function"].arguments then
-                  toolCalls[idx]["function"].arguments = toolCalls[idx]["function"].arguments .. tc["function"].arguments
-                end
-              end
-            end
-          end
-          if choice.finish_reason then
-            finishReason = choice.finish_reason
-          end
         end
+      end
+      -- Only a real reason ends the reply: some servers send "" (or null)
+      -- in every chunk until the last
+      if type(choice.finish_reason) == "string" and choice.finish_reason ~= "" then
+        finishReason = choice.finish_reason
+        sawEnd = true
       end
     end
 
@@ -283,16 +361,59 @@ local function createLanguageModel(modelId, config)
     -- A final line without a trailing newline
     handleLine(buffer)
 
-    -- Tool calls in index order (deltas are keyed by index)
-    local maxIndex = 0
-    for idx in pairs(toolCalls) do
-      if idx > maxIndex then maxIndex = idx end
-    end
-    local toolCallsList = {}
-    for idx = 1, maxIndex do
-      if toolCalls[idx] then
-        table.insert(toolCallsList, toolCalls[idx])
+    if not sawData then
+      local host = utils.hostOf(url)
+      local body = table.concat(otherLines, "\n")
+      if sawSSE and not body:find("%S") then
+        -- An event stream that the server closed before any data, e.g.
+        -- after only keep-alives while the request waited in a queue. Not
+        -- a wrong base URL.
+        error("The server closed the stream before sending any data " ..
+          "(only keep-alive messages arrived from " .. host .. ").", 0)
       end
+      -- Not an event stream: the other lines are read as a whole (comment
+      -- and field lines are left out of them, so an error object after a
+      -- keep-alive is still read, and an HTML page with a CSS line such as
+      -- ":root {" still gets the base URL hint). Plain JSON: a whole
+      -- completion (the server ignored stream=true) or an error; anything
+      -- else is reported with its first bytes rather than taken as an
+      -- empty answer.
+      local start = body:sub(1, 300):gsub("%s+", " "):gsub("^ ", "")
+      local ok, data = pcall(json.decode, body)
+      if ok and type(data) == "table" then
+        if hasError(data) then
+          error(utils.errorMessage(data, body), 0)
+        end
+        local choice = type(data.choices) == "table" and data.choices[1]
+        if type(choice) == "table" and type(choice.message) == "table" then
+          local parsed = parseResponse(data)
+          if onChunk and parsed.text ~= "" then
+            onChunk({ type = "text", text = parsed.text })
+          end
+          return parsed
+        end
+      end
+      if start == "" then
+        error("The reply from " .. host .. " was empty (expected an event stream).", 0)
+      end
+      error("Expected an event stream from " .. host ..
+        " (is the base URL right?). The reply starts with: " .. start:sub(1, 120), 0)
+    end
+    if not sawEnd then
+      -- The stream stopped without [DONE] or a finish reason: the server
+      -- ended it early (some document this for errors mid-stream)
+      finishReason = "incomplete"
+    end
+
+    -- Tool calls in index order (deltas are keyed by index)
+    local indexes = {}
+    for idx in pairs(toolCalls) do
+      indexes[#indexes + 1] = idx
+    end
+    table.sort(indexes)
+    local toolCallsList = {}
+    for _, idx in ipairs(indexes) do
+      table.insert(toolCallsList, toolCalls[idx])
     end
 
     return {

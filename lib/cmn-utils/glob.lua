@@ -19,10 +19,54 @@ local function globToPattern(globPat)
   return "^" .. pat .. "$"
 end
 
--- Convert a glob to the Lua patterns that together implement it. "**/" may
--- match zero or more directories ("**/*.lua" also matches "startup.lua"),
--- which one Lua pattern can't express, so each "**/" doubles the variants.
-local function globToPatterns(globPat)
+-- Expand {a,b} alternatives: "*.{lua,txt}" gives "*.lua" and "*.txt".
+-- Several groups multiply; groups don't nest. Braces without a comma in
+-- them are plain text.
+local function expandBraces(globPat)
+  local open = globPat:find("{", 1, true)
+  local close = open and globPat:find("}", open + 1, true)
+  if not close then
+    return { globPat }
+  end
+  local before, inner = globPat:sub(1, open - 1), globPat:sub(open + 1, close - 1)
+  local tails = expandBraces(globPat:sub(close + 1))
+  local alternatives = { "{" .. inner .. "}" }
+  if inner:find(",", 1, true) then
+    alternatives = {}
+    for alternative in (inner .. ","):gmatch("([^,]*),") do
+      alternatives[#alternatives + 1] = alternative
+    end
+  end
+  local out = {}
+  for _, alternative in ipairs(alternatives) do
+    for _, tail in ipairs(tails) do
+      out[#out + 1] = before .. alternative .. tail
+    end
+  end
+  return out
+end
+
+-- Paths are matched relative to the search directory: a leading "./" or
+-- "/" means that directory, and a trailing "/" everything under a folder
+local function normalise(globPat)
+  repeat
+    local before = globPat
+    globPat = globPat:gsub("^%./", ""):gsub("^/+", "")
+  until globPat == before
+  if globPat == "" or globPat == "." then
+    return "**"
+  end
+  if globPat:sub(-1) == "/" then
+    return globPat .. "**"
+  end
+  return globPat
+end
+
+-- Convert one glob alternative (no braces) to the Lua patterns that
+-- together implement it. "**/" may match zero or more directories
+-- ("**/*.lua" also matches "startup.lua"), which one Lua pattern can't
+-- express, so each "**/" doubles the variants.
+local function alternativeToPatterns(globPat)
   local variants = { "" }
   local function append(s)
     for i = 1, #variants do
@@ -46,6 +90,9 @@ local function globToPatterns(globPat)
     elseif globPat:sub(i, i) == "*" then
       append("[^/]*")
       i = i + 1
+    elseif globPat:sub(i, i) == "?" then
+      append("[^/]")
+      i = i + 1
     else
       append(escape(globPat:sub(i, i)))
       i = i + 1
@@ -55,6 +102,31 @@ local function globToPatterns(globPat)
     variants[j] = "^" .. variants[j] .. "$"
   end
   return variants
+end
+
+-- A glob's alternatives, each { patterns = {...}, path = bool }. path: the
+-- alternative has a "/", so it is meant for paths, not file names.
+local function compile(globPat)
+  local alternatives = {}
+  for _, alternative in ipairs(expandBraces(globPat)) do
+    alternatives[#alternatives + 1] = {
+      patterns = alternativeToPatterns(normalise(alternative)),
+      path = alternative:find("/", 1, true) ~= nil,
+    }
+  end
+  return alternatives
+end
+
+-- Convert a glob to the Lua patterns that together implement it (a path
+-- matches the glob when it matches any of them)
+local function globToPatterns(globPat)
+  local patterns = {}
+  for _, alternative in ipairs(compile(globPat)) do
+    for _, pat in ipairs(alternative.patterns) do
+      patterns[#patterns + 1] = pat
+    end
+  end
+  return patterns
 end
 
 local function matchesAny(str, patterns)
@@ -71,6 +143,9 @@ end
 -- @param basePath string: Starting directory (default: current directory)
 -- @return table: { path = basePath, pattern = pattern, matches = {...} }
 function glob.find(pattern, basePath)
+  if type(pattern) ~= "string" or pattern == "" then
+    return { error = "pattern must be a non-empty string" }
+  end
   basePath = path.resolve(basePath or ".")
   local matches = {}
   local patterns = globToPatterns(pattern)
@@ -109,7 +184,28 @@ function glob.match(name, pattern)
   return name:match("^" .. pat .. "$") ~= nil
 end
 
--- Convert glob to Lua pattern (exposed for advanced use)
+-- A function(relPath, name) that tells whether a file matches a glob, as
+-- grep's filter: a glob with a "/" ("lib/**/*.lua") is matched against the
+-- path relative to the search directory; one without ("*.lua") against the
+-- file name, at any depth (like ripgrep). With {a,b}, each alternative is
+-- matched its own way. No glob matches everything.
+function glob.matcher(pattern)
+  if not pattern or pattern == "" then
+    return function() return true end
+  end
+  local alternatives = compile(pattern)
+  return function(relPath, name)
+    for _, alternative in ipairs(alternatives) do
+      if matchesAny(alternative.path and relPath or name, alternative.patterns) then
+        return true
+      end
+    end
+    return false
+  end
+end
+
+-- Convert glob to Lua pattern(s) (exposed for advanced use)
 glob.toPattern = globToPattern
+glob.toPatterns = globToPatterns
 
 return glob

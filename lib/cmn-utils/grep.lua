@@ -48,6 +48,30 @@ function grep.search(pattern, opts)
   local maxLineLength = opts.maxLineLength or 200
   local results = {}
   local fromRoot = basePath == "/"
+  local globPattern = opts.glob
+  if globPattern ~= nil and type(globPattern) ~= "string" then
+    return { error = "glob must be a string" }
+  end
+  if globPattern == "" then
+    globPattern = nil
+  end
+  -- A glob with a "/" picks files by their path under a search directory;
+  -- a search of one file ignores it
+  if globPattern and globPattern:find("/", 1, true) and fs.exists(basePath) and not fs.isDir(basePath) then
+    globPattern = nil
+  end
+  -- matches(relPath, name): the glob filter ("**/*.lua" or "*.lua")
+  local globMatches = cmnGlob.matcher(globPattern)
+  -- Files the glob let through, so a glob that matches nothing is told
+  -- apart from a pattern that is not found
+  local filesMatched = 0
+  local function matches(relPath, name)
+    if globMatches(relPath, name) then
+      filesMatched = filesMatched + 1
+      return true
+    end
+    return false
+  end
 
   if opts.literal then
     pattern = escapeLiteral(pattern)
@@ -65,7 +89,7 @@ function grep.search(pattern, opts)
     local lineNum = 0
     for line in nextLine do
       lineNum = lineNum + 1
-      if lineNum % 200 == 0 then path.maybeYield() end
+      path.maybeYield() -- (it yields only every few hundred calls)
       -- Some malformed patterns ("a[") only fail once a line reaches them
       local okFind, found = pcall(string.find, line, pattern)
       if not okFind then
@@ -89,7 +113,7 @@ function grep.search(pattern, opts)
   local function walk(dir, prefix)
     if not fs.isDir(dir) then
       -- Single file
-      if cmnGlob.match(fs.getName(dir), opts.glob) then
+      if matches(prefix, fs.getName(dir)) then
         searchFile(dir, prefix)
       end
       return
@@ -103,7 +127,7 @@ function grep.search(pattern, opts)
           walk(fullPath, relPath)
         end
       else
-        if cmnGlob.match(entry, opts.glob) then
+        if matches(relPath, entry) then
           if searchFile(fullPath, relPath) then
             return -- Max results reached
           end
@@ -121,10 +145,18 @@ function grep.search(pattern, opts)
     if walkErr == "Terminated" then error(walkErr, 0) end
     return { error = tostring(walkErr) }
   end
+  local note
+  if globPattern and filesMatched == 0 then
+    note = "No file matched the glob \"" .. globPattern .. "\", so no file was searched."
+    if fromRoot then
+      note = note .. " (A search from / skips /rom: search path /rom for it.)"
+    end
+  end
   return {
     pattern = opts.literal and ("literal: " .. pattern) or pattern,
     results = results,
-    truncated = #results >= maxResults
+    truncated = #results >= maxResults,
+    note = note,
   }
 end
 

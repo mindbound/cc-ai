@@ -67,6 +67,7 @@ local abandoned = {}
 local function hostOf(url)
   return url:match("^%w+://([^/]+)") or url
 end
+utils.hostOf = hostOf
 
 -- Close a reply that belongs to a request this program abandoned. Returns
 -- true when the event was such a reply. (Replies to other programs'
@@ -251,20 +252,147 @@ function utils.decodeJSON(text)
     :format(select(2, text:find("$")), tail), 0)
 end
 
+-- Parse one line of a server-sent event stream. Returns "data" and the
+-- decoded JSON, "done" for [DONE], or nil for other lines (and for data
+-- that is not JSON). The third value is a data line's text as sent. The
+-- space after "data:" is optional, as the SSE spec allows.
 function utils.parseSSELine(line)
   line = line:gsub("\r$", "")
-  if line:sub(1, 6) == "data: " then
-    local data = line:sub(7)
+  local data = line:match("^data: ?(.*)$")
+  if data then
     if data == "[DONE]" then
-      return "done", nil
+      return "done", nil, data
     end
     local json = require("cmn-utils.json")
     local ok, parsed = pcall(json.decode, data)
     if ok then
-      return "data", parsed
+      return "data", parsed, data
     end
+    return nil, nil, data
   end
   return nil, nil
+end
+
+-- The message of an error that a server sent in a reply body: the
+-- "message" of { error = { message } }, { error = "..." } or
+-- { message = "..." }, else the raw text (at most 300 bytes).
+function utils.errorMessage(data, raw)
+  if type(data) == "table" then
+    local e = data.error
+    if type(e) == "table" and type(e.message) == "string" and e.message ~= "" then
+      return e.message
+    end
+    if type(e) == "string" and e ~= "" then
+      return e
+    end
+    if type(data.message) == "string" and data.message ~= "" then
+      return data.message
+    end
+    if type(e) == "table" then
+      local json = require("cmn-utils.json")
+      local ok, text = pcall(json.encode, e)
+      if ok then return text end
+    end
+  end
+  raw = type(raw) == "string" and raw:sub(1, 300):gsub("^%s+", ""):gsub("%s+$", "") or ""
+  if raw == "" then
+    return "The server reported an error without a message."
+  end
+  return raw
+end
+
+-- The text of a message's content: a string as it is, or the "text" parts
+-- of a list of parts joined (Mistral's reasoning models send
+-- [{type="thinking",...},{type="text",text="..."}]; thinking and other
+-- parts are left out). Anything else gives "".
+function utils.contentText(content)
+  if type(content) == "string" then
+    return content
+  end
+  if type(content) ~= "table" then
+    return ""
+  end
+  local texts = {}
+  for _, part in ipairs(content) do
+    if type(part) == "table" and part.type == "text" and type(part.text) == "string" then
+      texts[#texts + 1] = part.text
+    end
+  end
+  return table.concat(texts)
+end
+
+-- Keys whose value is one sub-schema, and keys whose value is a list of them
+local SUB_SCHEMA = { "items", "additionalProperties", "not" }
+local SUB_SCHEMA_LISTS = { "anyOf", "oneOf", "allOf" }
+
+-- A copy of a JSON schema without its empty "properties" tables, at every
+-- depth (through properties, items, additionalProperties, not, anyOf,
+-- oneOf and allOf). stack: the schemas being copied, so that a circular
+-- schema stops (json.encode then rejects it).
+local function withoutEmptyProperties(schema, stack)
+  if type(schema) ~= "table" or stack[schema] then
+    return schema
+  end
+  stack[schema] = true
+  local copy = {}
+  for k, v in pairs(schema) do
+    copy[k] = v
+  end
+  if type(schema.properties) == "table" then
+    if next(schema.properties) == nil then
+      copy.properties = nil
+    else
+      copy.properties = {}
+      for name, sub in pairs(schema.properties) do
+        copy.properties[name] = withoutEmptyProperties(sub, stack)
+      end
+    end
+  end
+  for _, key in ipairs(SUB_SCHEMA) do
+    local sub = schema[key]
+    if type(sub) == "table" and sub[1] ~= nil then
+      -- items given as a list of schemas (tuple form)
+      local list = {}
+      for i, item in ipairs(sub) do
+        list[i] = withoutEmptyProperties(item, stack)
+      end
+      copy[key] = list
+    else
+      copy[key] = withoutEmptyProperties(sub, stack)
+    end
+  end
+  for _, key in ipairs(SUB_SCHEMA_LISTS) do
+    if type(schema[key]) == "table" then
+      local list = {}
+      for i, item in ipairs(schema[key]) do
+        list[i] = withoutEmptyProperties(item, stack)
+      end
+      copy[key] = list
+    end
+  end
+  stack[schema] = nil
+  return copy
+end
+
+-- The JSON schema to send for a tool's parameters, or nil to send none.
+-- A tool without arguments is sent without a schema: rxi json encodes an
+-- empty table as [] ("properties":{} would go out as "properties":[]),
+-- which OpenAI and Gemini reject. For the same reason, empty "properties"
+-- of nested object parameters are left out. needProperties: also leave out
+-- a schema that has no "properties" (Gemini rejects an object schema
+-- without them).
+function utils.toolParameters(parameters, needProperties)
+  if type(parameters) ~= "table" or next(parameters) == nil then
+    return nil
+  end
+  local properties = parameters.properties
+  if type(properties) == "table" and next(properties) == nil then
+    return nil
+  end
+  if needProperties and properties == nil then
+    return nil
+  end
+  return withoutEmptyProperties(parameters, {})
 end
 
 return utils

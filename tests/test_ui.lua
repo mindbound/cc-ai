@@ -114,6 +114,17 @@ return function(T)
     end
   end
 
+  -- Wait (up to about 2.5 seconds) until the screen shows sub
+  local function waitScreen(sub)
+    return function(win)
+      for _ = 1, 50 do
+        if screen(win):find(sub, 1, true) then return end
+        tick()
+      end
+      T.contains(screen(win), sub, "screen")
+    end
+  end
+
   -- cc-code must still be running (it prints "Goodbye!" on exit)
   local function expectRunning(win)
     T.ok(not screen(win):find("Goodbye!", 1, true), "cc-code exited:\n" .. screen(win))
@@ -137,6 +148,7 @@ return function(T)
   local defaultModel = "anthropic/claude-sonnet-4"
 
   T.test("TUI: chat turn with a tool call, UTF-8 reply, then /exit", function()
+    T.vanillaOnly()
     mock.reset()
     agent.config.model = defaultModel
     mock.push({ body = chat(nil, { { id = "c1", type = "function", ["function"] = { name = "list_directory", arguments = "{\"path\":\"/rom\"}" } } }) })
@@ -145,8 +157,8 @@ return function(T)
       expectScreen("cc-code"),
       "hello", "enter",
       expectScreen("> hello"),
-      expectScreen(">> list_directory"),
-      expectScreen("Found caf\233 - done"),
+      waitScreen("* list /rom - "),
+      waitScreen("Found caf\233 - done"),
       "/exit", "enter",
     })
     T.contains(screen(win), "Goodbye!")
@@ -182,7 +194,7 @@ return function(T)
     mock.reset()
     runUI(51, 19, {}, {
       "/help", "enter",
-      expectScreen("API keys: exit, then run"), -- end of the help text
+      expectScreen(".cc-code/skills (this directory)"), -- end of the help text
       "up",
       function(win)
         T.contains(inputLine(win), "/help", "input line after Up")
@@ -201,7 +213,7 @@ return function(T)
         expectRunning(win)
       end,
       "enter",
-      expectScreen("API keys: exit, then run"),
+      expectScreen(".cc-code/skills (this directory)"),
       "/exit", "enter",
     })
   end)
@@ -267,9 +279,9 @@ return function(T)
     mock.push({ body = chat("first reply") })
     runUI(51, 19, {}, {
       "hello", "enter",
-      expectScreen("first reply"),
+      waitScreen("first reply"),
       "/help", "enter",
-      expectScreen("API keys: exit, then run"),
+      expectScreen(".cc-code/skills (this directory)"),
       "up",
       function(win) T.eq(inputLine(win), " > /help") end,
       "up",
@@ -292,7 +304,7 @@ return function(T)
     mock.push({ body = chat("the reply") })
     runUI(51, 19, {}, {
       "hi", "enter",
-      expectScreen("the reply"),
+      waitScreen("the reply"),
       { "terminate" }, -- no T key event: the user was cancelling the request
       expectRunning,
       expectScreen("the reply"),
@@ -309,7 +321,7 @@ return function(T)
         function(win) T.contains(screen(win), "/model", "popup at " .. size[1] .. "x" .. size[2]) end,
         { "terminate" }, -- clears the input
         "hi", "enter",
-        expectScreen("wrap"),
+        waitScreen("wrap"),
         CTRL_T,
       })
     end
@@ -352,13 +364,69 @@ return function(T)
     T.eq(capture.hooks, nil, "capture hooks cleared on exit")
   end)
 
+  T.test("TUI: /tools off hides tool lines, and the choice is used next time", function()
+    mock.reset()
+    agent.config.model = defaultModel
+    settings.unset("cc-code.tools")
+    mock.push({ body = chat(nil, { { id = "t1", type = "function", ["function"] = { name = "list_directory", arguments = "{\"path\":\"/rom\"}" } } }) })
+    mock.push({ body = chat("Listed it") })
+    runUI(51, 19, {}, {
+      "/tools off", "enter",
+      expectScreen("Tool calls are now shown: off"),
+      "hello", "enter",
+      waitScreen("Listed it"),
+      function(w)
+        T.ok(not screen(w):find("list /rom", 1, true), "no tool line")
+      end,
+      "/exit", "enter",
+    })
+    T.eq(settings.get("cc-code.tools"), "off")
+    mock.push({ body = chat(nil, { { id = "t2", type = "function", ["function"] = { name = "list_directory", arguments = "{\"path\":\"/rom\"}" } } }) })
+    mock.push({ body = chat("Again") })
+    runUI(51, 19, {}, {
+      "hello", "enter",
+      waitScreen("Again"),
+      function(w)
+        T.ok(not screen(w):find("list /rom", 1, true), "still hidden after a restart")
+      end,
+      "/exit", "enter",
+    })
+    settings.unset("cc-code.tools")
+  end)
+
+  T.test("a bare /tools reports the mode in use after !set changed the setting", function()
+    for _, config in ipairs({ {}, { forceTerminal = true } }) do
+      local mode = config.forceTerminal and "terminal mode" or "TUI"
+      mock.reset()
+      agent.config.model = defaultModel
+      settings.unset("cc-code.tools")
+      mock.push({ body = chat(nil, { { id = "t3", type = "function", ["function"] = { name = "list_directory", arguments = "{\"path\":\"/rom\"}" } } }) })
+      mock.push({ body = chat("Listed it") })
+      runUI(51, 19, config, {
+        "!set cc-code.tools off", "enter",
+        function() T.eq(settings.get("cc-code.tools"), "off", mode .. ": set ran") end,
+        "/tools", "enter",
+        waitScreen("Tool calls are shown: short"),
+        -- That is the mode the next turn uses
+        "hello", "enter",
+        waitScreen("Listed it"),
+        expectScreen("list /rom"),
+        "/tools full", "enter",
+        "/tools", "enter",
+        waitScreen("Tool calls are shown: full"),
+        "/exit", "enter",
+      })
+    end
+    settings.unset("cc-code.tools")
+  end)
+
   T.test("terminal mode: chat turn and /exit", function()
     mock.reset()
     agent.config.model = defaultModel
     mock.push({ body = chat("Terminal reply") })
     local win = runUI(51, 19, { forceTerminal = true }, {
       "hello", "enter",
-      expectScreen("Terminal reply"),
+      waitScreen("Terminal reply"),
       function(w)
         T.eq(count(screen(w), "> hello"), 1, "input shown once")
       end,
@@ -398,7 +466,7 @@ return function(T)
       "up", CTRL_T, -- recalled from history: the line is not known to be empty
       expectRunning,
       "hi", "enter",
-      expectScreen("the reply"),
+      waitScreen("the reply"),
       { "terminate" }, -- left over from cancelling the request
       expectRunning,
       CTRL_T,
@@ -615,6 +683,8 @@ return function(T)
   end)
 
   T.test("unicode mod: tool previews are cut by cells", function()
+    tui.setToolDisplay("full")
+    terminal.setToolDisplay("full")
     T.withUnicodeMod(function()
       local cw, done = cellTUI(51, 19)
       local ok, err = pcall(function()
@@ -643,9 +713,244 @@ return function(T)
       if not ok then error(err, 0) end
       T.eq(rec.getText(), "<< " .. string.rep(DASH, 97) .. "...")
     end)
+    tui.setToolDisplay("short")
+    terminal.setToolDisplay("short")
+  end)
+
+  T.test("short tool lines: one row each, completed in place", function()
+    -- (the cell-checking window needs the simulated mod; the text is ASCII)
+    local ok, err
+    T.withUnicodeMod(function()
+      local cw, done = cellTUI(40, 12)
+      ok, err = pcall(function()
+        tui.setToolDisplay("short")
+        tui.printToolCall("read_file", { path = "startup.lua" })
+        T.eq(cw.text(2), " * read startup.lua")
+        tui.printToolResult("read_file", { totalLines = 12 })
+        T.eq(cw.text(2), " * read startup.lua - 12 lines", "same row")
+        T.eq(cw.text(3), "")
+        tui.printToolCall("shell", { command = "mine 3" })
+        tui.printToolResult("shell", { success = false, output = "mine.lua:7: attempt to call nil, a very long message" })
+        -- One row, cut to the 38-cell content width; "!" marks the failure
+        T.eq(cw.text(3), " ! $ mine 3 - failed: mine.lua:7: at...")
+        T.eq(cw.text(4), "")
+        -- Text printed between a call and its result: the result gets a line
+        tui.printToolCall("glob", { pattern = "*.lua" })
+        tui.print("note")
+        tui.printToolResult("glob", { matches = { "a.lua" } })
+        T.eq(cw.text(4), " * glob *.lua")
+        T.eq(cw.text(5), " note")
+        T.eq(cw.text(6), " * glob *.lua - 1 file")
+        -- off: nothing
+        tui.clear()
+        tui.setToolDisplay("off")
+        tui.printToolCall("read_file", { path = "x" })
+        tui.printToolResult("read_file", { totalLines = 1 })
+        T.eq(cw.text(2), "")
+      end)
+      tui.setToolDisplay("short")
+      done()
+    end)
+    if not ok then error(err, 0) end
+
+    -- Terminal mode: the line is finished when the result comes in ("!"
+    -- replaces "*" when the call failed), and a call that never gets one
+    -- is ended before the next text
+    local rec = capture.createTerminal(80, 20)
+    local old = term.redirect(rec)
+    ok, err = pcall(function()
+      terminal.setToolDisplay("short")
+      terminal.printToolCall("edit_file", { path = "a.lua" })
+      terminal.printToolResult("edit_file", { error = "String not found in file" })
+      terminal.printToolCall("shell", { command = "loop" })
+      terminal.printToolResult("shell", { cancelled = true, command = "loop", output = "tick 1\ntick 2\n" })
+      terminal.printToolCall("my_tool", { n = 1 })
+      terminal.printToolResult("my_tool", nil)
+      terminal.printToolCall("shell", { command = "loop" })
+      terminal.print("Request cancelled (Ctrl+T).")
+    end)
+    term.redirect(old)
+    if not ok then error(err, 0) end
+    T.eq(rec.getText(), table.concat({
+      "! edit a.lua - error: String not found in file",
+      "* $ loop - stopped (Ctrl+T): tick 2",
+      "* my_tool {\"n\":1} - done",
+      "* $ loop",
+      "Request cancelled (Ctrl+T).",
+    }, "\n"))
+
+    -- A call line that wrapped and scrolled the screen still gets its "!"
+    rec = capture.createTerminal(30, 3)
+    old = term.redirect(rec)
+    ok, err = pcall(function()
+      print("a")
+      print("b")
+      terminal.printToolCall("shell", { command = string.rep("x", 40) })
+      terminal.printToolResult("shell", { success = false, output = "boom" })
+    end)
+    term.redirect(old)
+    if not ok then error(err, 0) end
+    T.eq(rec.getText(), "a\nb\n! $ " .. string.rep("x", 26) .. "\n" .. string.rep("x", 14) .. " - failed: boom")
+  end)
+
+  -- A TUI on a plain w x h window (vanilla: one byte per cell); fn gets the
+  -- window and its content rows as text
+  local function plainTUI(w, h, config, fn)
+    local win = window.create(term.current(), 1, 1, w, h, false)
+    local old = term.redirect(win)
+    local ok, err = pcall(function()
+      tui.init(config or {})
+      tui.setToolDisplay("short")
+      fn(win, function(y) return ((win.getLine(y)):gsub("%s+$", "")) end)
+    end)
+    pcall(tui.cleanup)
+    term.redirect(old)
+    if not ok then error(err, 0) end
+  end
+
+  T.test("short tool lines keep the outcome on narrow screens; a resize cuts again", function()
+    local function calls()
+      tui.printToolCall("edit_file", { path = "startup.lua" })
+      tui.printToolResult("edit_file", { error = "String not found in file" })
+      tui.printToolCall("shell", { command = "programs/quarry 3 3" })
+      tui.printToolResult("shell", { success = false, output = "quarry.lua:12: attempt to call nil" })
+      tui.printToolCall("read_file", { path = "programs/quarry.lua" })
+      tui.printToolResult("read_file", { totalLines = 120 })
+    end
+    -- A pocket computer (24 content cells): the call gives way first
+    plainTUI(26, 12, { monochrome = true }, function(win, row)
+      calls()
+      T.eq(row(2), " ! edit ... - error: S...")
+      T.eq(row(3), " ! $ pro... - failed: ...")
+      T.eq(row(4), " * read pr... - 120 lines")
+      T.eq(row(5), "")
+    end)
+    -- A turtle (37 cells): the call stays whole when the outcome still shows
+    plainTUI(39, 12, { monochrome = true }, function(win, row)
+      calls()
+      T.eq(row(2), " ! edit startup.lua - error: String...")
+      T.eq(row(3), " ! $ programs/qu... - failed: quarr...")
+      T.eq(row(4), " * read programs/quarry... - 120 lines")
+      -- Monochrome: failures differ from successes by the mark, and the
+      -- outcome is drawn white (error) or light grey (dim)
+      local _, fg = win.getLine(2)
+      T.eq(fg:sub(2, 2), colours.toBlit(colours.white))
+      _, fg = win.getLine(4)
+      T.eq(fg:sub(2, 2), colours.toBlit(colours.lightGrey))
+      -- Narrower now: the lines are cut again from their whole text
+      win.reposition(1, 1, 26, 12)
+      tui.handleEvent("term_resize")
+      T.eq(row(2), " ! edit ... - error: S...")
+      T.eq(row(4), " * read pr... - 120 lines")
+      win.reposition(1, 1, 39, 12)
+      tui.handleEvent("term_resize")
+      T.eq(row(2), " ! edit startup.lua - error: String...")
+    end)
+  end)
+
+  T.test("short tool lines: a tool that returns nothing is done", function()
+    plainTUI(51, 12, {}, function(_, row)
+      tui.printToolCall("my_tool", { n = 1 })
+      T.eq(row(2), " * my_tool {\"n\":1}")
+      tui.printToolResult("my_tool", nil)
+      T.eq(row(2), " * my_tool {\"n\":1} - done")
+      -- A call stopped with Ctrl+T
+      tui.printToolCall("shell", { command = "farm" })
+      tui.printToolResult("shell", { cancelled = true, output = "row 4 done" })
+      T.eq(row(3), " * $ farm - stopped (Ctrl+T): row 4 done")
+    end)
+  end)
+
+  T.test("TUI: a tool that raises completes its line as failed", function()
+    mock.reset()
+    agent.config.model = defaultModel
+    local skills = require("cc-code.skills")
+    local ai = require("ai")
+    skills.register(skills.create({
+      name = "uiraiser",
+      tools = { ai.tool({
+        name = "probe_it",
+        description = "Probe",
+        parameters = { type = "object", properties = { side = { type = "string" } } },
+        execute = function() error("no peripheral", 0) end,
+      }) },
+    }))
+    mock.push({ body = chat(nil, { { id = "r1", type = "function", ["function"] = { name = "probe_it", arguments = "{\"side\":\"top\"}" } } }) })
+    mock.push({ body = chat("Nothing there.") })
+    local ok, err = pcall(runUI, 51, 19, {}, {
+      "probe", "enter",
+      waitScreen("Nothing there."),
+      function(win)
+        local found
+        for y = 1, 19 do
+          local text, fg = win.getLine(y)
+          if text:find("probe_it", 1, true) then
+            T.eq((text:gsub("%s+$", "")), " ! probe_it {\"side\":\"top\"} - error: no peripheral")
+            T.eq(fg:sub(2, 2), colours.toBlit(colours.red), "error colour")
+            found = true
+          end
+        end
+        T.ok(found, "a probe_it row:\n" .. screen(win))
+      end,
+      "/exit", "enter",
+    })
+    skills.registry.uiraiser = nil
+    if not ok then error(err, 0) end
+  end)
+
+  T.test("TUI: skill problems are shown at startup as the loader words them", function()
+    mock.reset()
+    agent.config.model = defaultModel
+    -- (short, so the message's start fits one 49-cell row)
+    local dir = T.tmp .. "/us"
+    if fs.exists(dir) then fs.delete(dir) end
+    T.writeFile(dir .. "/broken.lua", "return 42")
+    local savedUser = agent.USER_SKILLS_DIR
+    agent.USER_SKILLS_DIR = dir
+    local ok, err = pcall(runUI, 51, 19, {}, {
+      function(win)
+        local s = screen(win)
+        T.contains(s, "Skill not loaded: " .. dir .. "/broken.lua")
+        T.ok(not s:find("Skill not loaded: Skill not loaded", 1, true), "no doubled prefix")
+      end,
+      "/exit", "enter",
+    })
+    agent.USER_SKILLS_DIR = savedUser
+    fs.delete(dir)
+    if not ok then error(err, 0) end
+  end)
+
+  T.test("TUI: warnings from a turn are shown after the reply", function()
+    mock.reset()
+    agent.config.model = defaultModel
+    local skills = require("cc-code.skills")
+    skills.register(skills.create({
+      name = "brokenprompt",
+      systemPrompt = function() error("no modem", 0) end,
+    }))
+    mock.push({ body = chat("Hello there") })
+    local ok, err = pcall(runUI, 51, 19, {}, {
+      "hi", "enter",
+      waitScreen("Hello there"),
+      function(win)
+        local s = screen(win)
+        T.contains(s, "The brokenprompt skill's")
+        T.ok(s:find("Hello there", 1, true) < s:find("brokenprompt", 1, true), "after the reply")
+        for y = 1, 19 do
+          local text, fg = win.getLine(y)
+          if text:find("The brokenprompt", 1, true) then
+            T.eq(fg:sub(2, 2), colours.toBlit(colours.red), "error colour")
+          end
+        end
+      end,
+      "/exit", "enter",
+    })
+    skills.registry.brokenprompt = nil
+    if not ok then error(err, 0) end
   end)
 
   T.test("unicode mod: UTF-8 is drawn as is, converted without the mod", function()
+    T.vanillaOnly()
     local sample = "caf" .. EACUTE .. " " .. DASH .. " ok"
     T.withUnicodeMod(function()
       local cw, done = cellTUI(30, 12)

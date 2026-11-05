@@ -104,8 +104,18 @@ local result = ai.generateText({
 })
 
 print(result.text)
-print(result.finishReason)  -- "stop", "length", "tool_calls", etc.
+print(result.finishReason)  -- "stop", "length", "tool_calls", "incomplete", etc.
 ```
+
+`finishReason` is the provider's reason, with these common values:
+
+- `"stop"`: the model finished its answer.
+- `"length"`: the answer was cut off at the output token limit (`maxOutputTokens` or the model's own).
+- `"tool_calls"`: the model asked for tools (the last step of a loop that hit `maxSteps`, for example).
+- `"incomplete"`: the event stream stopped without `[DONE]` or a finish reason, so the server ended the reply early. `result.text` holds what arrived. The OpenAI-compatible providers (gateway, `openai`, `groq`, `custom`) give it in `streamText`, and in `generateText` when they use streamed replies (`custom` does by default).
+- `nil`: the server sent no reason (some end a stream with `[DONE]` only). Use `tostring(result.finishReason)` when you print it.
+
+`result.text` is always a string. Some servers send a message's content as a list of parts (Mistral's reasoning models send `thinking` and `text` parts). The OpenAI-compatible providers then give the `text` parts joined, in `result.text` and in `onChunk`, and leave the thinking out.
 
 ### streamText
 
@@ -121,10 +131,17 @@ ai.streamText({
     end
   end,
   onFinish = function(result)
-    print("\nDone: " .. result.finishReason)
+    print("\nDone: " .. tostring(result.finishReason))
   end,
 })
 ```
+
+How the OpenAI-compatible providers (gateway, `openai`, `groq`, `custom`) read the reply of a streamed request:
+
+- An event stream (`data:` lines) is read up to `[DONE]` or a finish reason. Comment lines (`: keep-alive`, `: OPENROUTER PROCESSING`) and `event:`, `id:` or `retry:` lines are skipped. A stream that stops before its end gives `finishReason == "incomplete"`.
+- An error in the stream raises its message: a data event with an `"error"` key, an `event: error` event, or an `error: ...` line.
+- A stream that the server closes after only keep-alive messages (comment or field lines, and nothing else) raises "The server closed the stream before sending any data".
+- A reply without `data:` lines is not an event stream, and is read as plain JSON (comment and field lines left out). A whole completion (from a server that ignores `stream = true`) is returned as if it had been streamed, with a single `onChunk` call, and an error object raises its message. Anything else raises "Expected an event stream" with the first bytes of the reply (often an HTML page from a wrong base URL), or "was empty".
 
 ### generateObject
 
@@ -177,7 +194,9 @@ local result = ai.generateText({
 
 Each step is one model request; the tools a reply asks for run before the next one. When the loop stops at `maxSteps` with tool results the model has not seen yet, `result.stepLimitReached` is `true`. `result.steps` counts the requests.
 
-If a tool call's arguments are not valid JSON (usually a reply cut off at the output token limit, `finishReason == "length"`), the tool does not run. The model gets an error result saying so instead. Blank arguments count as no arguments (`{}`).
+If a tool call's arguments are not valid JSON (usually a reply cut off at the output token limit, `finishReason == "length"`), the tool does not run. The model gets an error result saying so instead. Blank arguments, and JSON that is not an object (such as `[]`), count as no arguments (`{}`). The exception is the last call of a reply that was cut off (`finishReason == "incomplete"`, the stream ended early, or `"length"`, the output token limit): the reply may have stopped right after the call's name, so that call does not run when its arguments are blank or not valid JSON. The model is told to send it again (in smaller parts, at the output token limit). In the history sent with later requests, such arguments become `{}`.
+
+A tool without arguments can leave out `parameters`, or give `properties = {}`. Such a tool is sent without a parameter schema, because the JSON encoder writes an empty table as `[]`, which the APIs reject (Gemini also rejects an object schema without properties). For the same reason, an empty `properties` table of a nested object parameter (at any depth, also under `items`) is left out of the schema that is sent; the tool's own table is not changed.
 
 A tool can raise `"Terminated"` (or `{ terminated = true, result = {...} }`, with a partial result) to cancel the call, as Ctrl+T does. The finished tool results of that step and an error for each remaining call are still added to `messages`, so the history stays valid, and then `generateText` raises `"Terminated"`.
 
@@ -210,6 +229,8 @@ Ctrl+T while waiting raises `"Terminated"`, as a blocking `http.post` does. Each
 Run examples from the CraftOS shell:
 
 ```
+(The examples are in a full install: `/cc-ai/install --full`.)
+
 /cc-ai/examples/generateText
 /cc-ai/examples/streamText
 /cc-ai/examples/toolCalling

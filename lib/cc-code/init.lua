@@ -16,6 +16,30 @@ occode.skills = skills
 -- Version
 occode.version = "0.2.0"
 
+-- The install's root directory (".../cc-ai"), found from this file
+local installRoot = (debug.getinfo(1, "S").source or ""):match("^@(.*)/lib/cc%-code/init%.lua$")
+
+-- What the installer recorded in <install root>/.version: { repo, branch,
+-- commit, installed }, or nil (not installed by install.lua, e.g. a copy)
+function occode.installInfo()
+  if not installRoot then return nil end
+  local path = installRoot .. "/.version"
+  if not fs.exists(path) then return nil end
+  local handle = fs.open(path, "rb")
+  if not handle then return nil end
+  local content = handle.readAll()
+  handle.close()
+  local info = textutils.unserialize(content or "")
+  return type(info) == "table" and info or nil
+end
+
+-- "v0.2.0" plus the installed commit when known: "v0.2.0 (f3e7a15)"
+function occode.versionText()
+  local info = occode.installInfo()
+  local commit = info and type(info.commit) == "string" and info.commit:match("^%x+$") and info.commit
+  return "v" .. occode.version .. (commit and (" (" .. commit:sub(1, 7) .. ")") or "")
+end
+
 -- Detect if we have TUI support. Every CC computer, turtle and pocket
 -- computer has a terminal; the TUI just needs one at least this big.
 function occode.hasTuiSupport()
@@ -91,8 +115,8 @@ local function turnCallbacks(ui)
       ui.setStatus("Running " .. name .. "...")
       ui.printToolCall(name, args)
     end,
-    onToolResult = function(name, result)
-      ui.printToolResult(name, result)
+    onToolResult = function(name, result, args)
+      ui.printToolResult(name, result, args)
     end,
   }
 end
@@ -111,12 +135,35 @@ local function runLoop(ui, config)
     capture.hooks = { before = ui.suspendTheme, after = ui.resumeTheme }
   end
 
-  ui.print("Welcome to cc-code v" .. occode.version, ui.colors and ui.colors.assistant)
+  -- How tool calls are shown (/tools; agent.state.toolDisplay keeps the
+  -- mode applied, which a bare /tools reports), and skill commands for
+  -- completion
+  if ui.setToolDisplay then
+    agent.state.toolDisplay = agent.toolDisplay()
+    ui.setToolDisplay(agent.state.toolDisplay)
+  end
+  if ui.addCommand then
+    local skillList = skills.getAll()
+    table.sort(skillList, function(a, b) return a.name < b.name end)
+    for _, skill in ipairs(skillList) do
+      for _, command in ipairs(skill.commands or {}) do
+        ui.addCommand(command, skill.description)
+      end
+    end
+  end
+
+  ui.print("Welcome to cc-code " .. occode.versionText(), ui.colors and ui.colors.assistant)
   ui.print("Type /help for available commands.", ui.colors and ui.colors.dim)
   ui.print("Use !<command> to execute shell commands (e.g., !ls)", ui.colors and ui.colors.dim)
   if agent.state.modelWarning then
     -- The saved cc-code.model setting is not a model
     ui.print("cc-code.model: " .. agent.state.modelWarning, ui.colors and ui.colors.error)
+  end
+  -- Skills that did not load, commands one skill took over from another,
+  -- skill commands that are built-in commands, skill tools that can't be
+  -- used (the messages are complete as given)
+  for _, problem in ipairs(agent.state.skillErrors or {}) do
+    ui.print(problem, ui.colors and ui.colors.error)
   end
   ui.print("", ui.colors and ui.colors.foreground)
 
@@ -147,6 +194,13 @@ local function runLoop(ui, config)
         elseif result.command == "clear" then
           ui.clear()
           ui.print("Conversation cleared.", ui.colors and ui.colors.dim)
+        elseif result.command == "tools" then
+          if ui.setToolDisplay then
+            agent.state.toolDisplay = result.mode
+            ui.setToolDisplay(result.mode)
+          end
+          ui.print("Tool calls are now shown: " .. result.mode .. " (saved for next time)",
+            ui.colors and ui.colors.dim)
         end
       elseif result.type == "error" then
         ui.printRole("error", result.text)
@@ -160,6 +214,11 @@ local function runLoop(ui, config)
         if result.notice then
           ui.print("(" .. result.notice .. ")", ui.colors and ui.colors.dim)
         end
+      end
+      -- Problems the turn ran into that the user should know about (e.g.
+      -- a skill whose systemPrompt failed)
+      for _, warning in ipairs(result.warnings or {}) do
+        ui.print(warning, ui.colors and ui.colors.error)
       end
 
       ui.print("", ui.colors and ui.colors.foreground)

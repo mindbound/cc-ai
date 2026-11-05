@@ -9,6 +9,7 @@
 local json = require("cmn-utils.json")
 local cctext = require("cmn-utils.text")
 local aiUtils = require("ai.utils")
+local toolview = require("cc-code.toolview")
 
 -- The CC colour API ("terminal.colors" below is the table of UI roles)
 local ccColors = colors
@@ -42,7 +43,10 @@ end
 local state = {
   running = true,
   status = "Ready",
-  showTools = true,
+  toolDisplay = "short",  -- /tools: "short", "full" or "off"
+  -- A short tool line that waits for its result: where its mark is, and
+  -- where the cursor was left after it
+  pendingLine = nil,
   monochrome = false,
 }
 
@@ -50,7 +54,7 @@ local state = {
 local inputHistory = {}
 
 -- Commands offered by Tab completion
-local commandNames = { "/help", "/?", "/model", "/turtle", "/clear", "/exit", "/quit" }
+local commandNames = { "/help", "/?", "/model", "/turtle", "/tools", "/clear", "/exit", "/quit" }
 
 -- Registered completion handlers: { prefix = { handler = fn, label = "Models" } }
 local completionHandlers = {}
@@ -70,8 +74,19 @@ local function setColor(color)
   end
 end
 
+-- End a short tool line that is still waiting for its result (the agent
+-- always sends one, even for a failed or stopped call; other callers may
+-- not), so the next text starts on its own line
+local function endPendingLine()
+  if state.pendingLine then
+    state.pendingLine = nil
+    print()
+  end
+end
+
 -- Print CC-charset text in a colour; print() wraps to the terminal width
 local function printText(str, color)
+  endPendingLine()
   setColor(color)
   print(str)
   term.setTextColour(ccColors.white)
@@ -99,6 +114,7 @@ function terminal.init(config)
   config = config or {}
   state.running = true
   state.status = "Ready"
+  state.pendingLine = nil
   state.monochrome = config.monochrome and true or false
   -- Reset colours to prevent TUI color bleed
   resetTerminalState()
@@ -126,21 +142,87 @@ function terminal.printRole(role, msg)
   terminal.print(prefix .. tostring(msg), color)
 end
 
+-- How tool calls are shown: "short" (one line each), "full" (the
+-- arguments and result as JSON previews) or "off"
+function terminal.setToolDisplay(mode)
+  if mode == "short" or mode == "full" or mode == "off" then
+    state.toolDisplay = mode
+  end
+end
+
+-- Write the start of a short tool line: the mark ("!" when the call
+-- failed) and the call. Returns the mark's column and the number of line
+-- breaks write() made (wrapping, or scrolling at the bottom).
+local function writeToolCall(name, args, failed)
+  local x = term.getCursorPos()
+  setColor(failed and terminal.colors.error or terminal.colors.toolName)
+  local breaks = write(toolview.mark(failed)) or 0
+  setColor(terminal.colors.toolName)
+  breaks = breaks + (write(" " .. preview(cctext.forDisplay(toolview.call(name, args)), 60)) or 0)
+  return x, breaks
+end
+
+-- Change a pending line's mark to "!" (its call failed). Only when the
+-- cursor is still where the line left it: the mark is then `breaks` rows
+-- up (each break moved the cursor down or scrolled the screen up).
+local function markFailed(pending)
+  local x, y = term.getCursorPos()
+  local row = y - pending.breaks
+  if x ~= pending.endX or y ~= pending.endY or row < 1 then
+    return
+  end
+  term.setCursorPos(pending.x, row)
+  setColor(terminal.colors.error)
+  term.write(toolview.mark(true))
+  term.setCursorPos(x, y)
+end
+
 -- Print tool call
 function terminal.printToolCall(name, args)
-  if not state.showTools then return end
+  endPendingLine()
+  if state.toolDisplay == "off" then return end
+  if state.toolDisplay == "short" then
+    -- The line is finished when the result comes in (nothing else is
+    -- written to the terminal while a tool runs)
+    local x, breaks = writeToolCall(name, args, false)
+    local endX, endY = term.getCursorPos()
+    state.pendingLine = { x = x, breaks = breaks, endX = endX, endY = endY }
+    return
+  end
   printText(">> " .. cctext.forDisplay(tostring(name)), terminal.colors.toolName)
   if args then
     printText("   " .. preview(toDisplay(args), 80), terminal.colors.dim)
   end
 end
 
--- Print tool result
-function terminal.printToolResult(name, result)
-  if not state.showTools then return end
+-- Print tool result (args: the call's arguments, when the caller has them)
+function terminal.printToolResult(name, result, args)
+  if state.toolDisplay == "off" then return end
+  if state.toolDisplay == "short" then
+    local outcome, failed = toolview.result(name, result, args)
+    local pending = state.pendingLine
+    state.pendingLine = nil
+    if not pending then
+      writeToolCall(name, args, failed)
+    elseif failed then
+      markFailed(pending)
+    end
+    setColor(failed and terminal.colors.error or terminal.colors.dim)
+    print(" - " .. preview(cctext.forDisplay(outcome), 60))
+    resetTerminalState()
+    return
+  end
   printText("<< " .. preview(toDisplay(result), 100), terminal.colors.dim)
   -- Reset terminal state after tool execution to prevent color bleed
   resetTerminalState()
+end
+
+-- Offer a command (from a skill) to Tab completion
+function terminal.addCommand(cmd)
+  for _, name in ipairs(commandNames) do
+    if name == cmd then return end
+  end
+  table.insert(commandNames, cmd)
 end
 
 -- Set status (stored only; terminal mode has no status bar). A list of
@@ -281,6 +363,7 @@ end
 
 -- Clear (just prints separator)
 function terminal.clear()
+  endPendingLine()
   print("---")
   print("Conversation cleared.")
   print("---")

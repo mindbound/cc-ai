@@ -11,6 +11,7 @@
 local json = require("cmn-utils.json")
 local cctext = require("cmn-utils.text")
 local aiUtils = require("ai.utils")
+local toolview = require("cc-code.toolview")
 
 local width, csub = cctext.width, cctext.sub
 
@@ -100,7 +101,8 @@ local state = {
   reading = false,
   running = true,
   status = "Ready",
-  showTools = true,
+  toolDisplay = "short",  -- /tools: "short", "full" or "off"
+  pendingTool = nil,      -- the short tool line waiting for its result
   -- Command popup state
   showCommandPopup = false,
   commandPopupIndex = 1,
@@ -125,7 +127,8 @@ local availableCommands = {
   { cmd = "/help", desc = "Show help and commands" },
   { cmd = "/?", desc = "Show help (alias)" },
   { cmd = "/model", desc = "View/switch AI model" },
-  { cmd = "/turtle", desc = "Ask with turtle API context" },
+  { cmd = "/turtle", desc = "Add the turtle API reference" },
+  { cmd = "/tools", desc = "Tool lines: short|full|off" },
   { cmd = "/clear", desc = "Clear conversation" },
   { cmd = "/exit", desc = "Exit cc-code" },
   { cmd = "/quit", desc = "Exit (alias)" },
@@ -295,11 +298,52 @@ local function wrapLine(line, cols, color, out)
   end
 end
 
--- Wrap a message into display lines; returns the number of lines added
+-- Cut s to cols cells, ending in "..." when cut
+local function cutTo(s, cols)
+  if longerThan(s, cols) then
+    return csub(s, 1, math.max(cols - 3, 1)) .. "..."
+  end
+  return s
+end
+
+-- A tool line that is too long keeps this many cells of its outcome
+-- (" - " not counted) before its call is cut: enough for "error: ..." or
+-- "stopped (Ctrl+T)"; the call keeps TOOL_CALL_MIN cells at least
+local TOOL_OUTCOME_MIN = 16
+local TOOL_CALL_MIN = 8
+
+-- A tool message as one row of cols cells: "* call - outcome" ("!" for a
+-- failed call). When it is too long, the call is cut first, so the start
+-- of the outcome ("error", "failed") stays visible; then the outcome's end.
+local function toolLineText(msg, cols)
+  local head = msg.mark .. " "
+  local call = msg.call
+  if not msg.outcome then
+    return cutTo(head .. call, cols)
+  end
+  local tail = " - " .. msg.outcome
+  local avail = cols - width(head)
+  local callWidth, tailWidth = width(call), width(tail)
+  if callWidth + tailWidth > avail then
+    local room = math.max(TOOL_CALL_MIN, avail - math.min(tailWidth, 3 + TOOL_OUTCOME_MIN))
+    if callWidth > room then
+      call = cutTo(call, room)
+    end
+  end
+  return cutTo(head .. call .. tail, cols)
+end
+
+-- Wrap a message into display lines; returns the number of lines added.
+-- A tool message (msg.tool) is one row, cut to the width instead; it keeps
+-- its parts, so a resize cuts it again from the whole text.
 local function wrapMessage(msg, cols)
   local lines = {}
   local str = msg.text
   local start = 1
+  if msg.tool then
+    state.history[#state.history + 1] = { text = toolLineText(msg, cols), color = msg.color }
+    return 1
+  end
   while true do
     local nl = str:find("\n", start, true)
     local line = str:sub(start, nl and (nl - 1) or -1)
@@ -317,16 +361,38 @@ local function wrapMessage(msg, cols)
   return #lines
 end
 
--- Add an already-prepared (forDisplay) message to the history
-local function addMessage(str, color)
+-- Add an already-prepared (forDisplay) message to the history. tool:
+-- { mark, call, outcome } for a one-row tool line (text is then unused).
+local function addMessage(str, color, tool)
   if not validColors[color] then
     color = tui.colors.foreground
   end
   local msg = { text = str, color = color }
+  if tool then
+    msg.tool, msg.mark, msg.call, msg.outcome = true, tool.mark, tool.call, tool.outcome
+  end
   state.messages[#state.messages + 1] = msg
   local _, _, w = getContentBounds()
   msg.lines = wrapMessage(msg, w)
   return msg
+end
+
+-- Finish the newest message, a tool line whose result came in: its mark,
+-- outcome and colour. Returns the change in wrapped lines, or nil when msg
+-- is no longer the newest message.
+local function completeToolMessage(msg, mark, outcome, color)
+  if state.messages[#state.messages] ~= msg then
+    return nil
+  end
+  for _ = 1, msg.lines do
+    state.history[#state.history] = nil
+  end
+  local before = msg.lines
+  msg.mark, msg.outcome = mark, outcome
+  msg.color = validColors[color] and color or msg.color
+  local _, _, w = getContentBounds()
+  msg.lines = wrapMessage(msg, w)
+  return msg.lines - before
 end
 
 -- Rebuild the wrapped history (after the width changed)
@@ -684,6 +750,7 @@ function tui.init(config)
   state.reading = false
   state.status = "Ready"
   state.statusParts = nil
+  state.pendingTool = nil
   state.showCommandPopup = false
   state.filteredCommands = {}
   state.commandPopupIndex = 1
@@ -787,9 +854,27 @@ function tui.printRole(role, msg)
   tui.print(prefix .. tostring(msg), color)
 end
 
+-- How tool calls are shown: "short" (one line each), "full" (the
+-- arguments and result as JSON previews) or "off"
+function tui.setToolDisplay(mode)
+  if mode == "short" or mode == "full" or mode == "off" then
+    state.toolDisplay = mode
+  end
+end
+
 -- Print tool call
 function tui.printToolCall(name, args)
-  if not state.showTools then return end
+  state.pendingTool = nil
+  if state.toolDisplay == "off" then return end
+  if state.toolDisplay == "short" then
+    -- One line, completed in place when the result comes in
+    local call = cctext.forDisplay(toolview.call(name, args))
+    local msg = addMessage("", tui.colors.toolName, { mark = toolview.mark(false), call = call })
+    state.pendingTool = { msg = msg, name = name, args = args }
+    keepView(msg.lines)
+    tui.redrawContent()
+    return
+  end
   tui.print(">> " .. tostring(name), tui.colors.toolName)
   if args then
     local argsStr = toDisplay(args)
@@ -801,15 +886,44 @@ function tui.printToolCall(name, args)
   end
 end
 
--- Print tool result
-function tui.printToolResult(name, result)
-  if not state.showTools then return end
+-- Print tool result (args: the call's arguments, when the caller has them)
+function tui.printToolResult(name, result, args)
+  local pending = state.pendingTool
+  state.pendingTool = nil
+  if state.toolDisplay == "off" then return end
+  if state.toolDisplay == "short" then
+    if pending and pending.name == name then
+      args = args or pending.args
+    else
+      pending = nil
+    end
+    local outcome, failed = toolview.result(name, result, args)
+    outcome = cctext.forDisplay(outcome)
+    local mark = toolview.mark(failed)
+    local color = failed and tui.colors.error or tui.colors.dim
+    local added = pending and completeToolMessage(pending.msg, mark, outcome, color)
+    if not added then
+      local call = cctext.forDisplay(toolview.call(name, args))
+      added = addMessage("", color, { mark = mark, call = call, outcome = outcome }).lines
+    end
+    keepView(added)
+    tui.redrawContent()
+    return
+  end
   local resultStr = toDisplay(result)
   if longerThan(resultStr, 200) then
     resultStr = csub(resultStr, 1, 197) .. "..."
   end
   keepView(addMessage("<< " .. resultStr, tui.colors.dim).lines)
   tui.redrawContent()
+end
+
+-- Offer a command (from a skill) in the command popup
+function tui.addCommand(cmd, desc)
+  for _, entry in ipairs(availableCommands) do
+    if entry.cmd == cmd then return end
+  end
+  table.insert(availableCommands, { cmd = cmd, desc = desc or "" })
 end
 
 -- Scroll functions
@@ -1300,6 +1414,7 @@ function tui.clear()
   state.messages = {}
   state.history = {}
   state.scrollOffset = 0
+  state.pendingTool = nil
   tui.clearContent()
 end
 

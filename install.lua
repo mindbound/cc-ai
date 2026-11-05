@@ -1,21 +1,48 @@
 -- cc-ai installer
 -- In-game:  wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
--- Options:  install [owner/repo] [branch] [directory]
--- Installs lib/, bin/, docs/, examples/, tests/ and this installer into
--- /cc-ai and adds a startup file that puts cc-code on the shell path.
--- Update later by running /cc-ai/install.
+-- Options:  install [--full | --minimal] [owner/repo] [branch] [directory]
+-- Installs lib/, bin/, docs/ and this installer into /cc-ai (--full adds
+-- examples/ and tests/) and adds a startup file that puts cc-code on the
+-- shell path. Update later by running /cc-ai/install, which keeps the
+-- previous choice of --full or --minimal unless given another.
+-- Every file comes from one commit: the branch is resolved to its commit
+-- first, because raw.githubusercontent.com caches branch URLs for minutes
+-- (an update right after a push could otherwise mix old and new files).
 
-local args = { ... }
+-- The options can be anywhere; the other arguments are read by position
+local args, FULL = {}, nil
+do
+  local given = table.pack(...)
+  local n = 0
+  for i = 1, given.n do
+    local value = given[i]
+    if value == "--full" then
+      FULL = true
+    elseif value == "--minimal" then
+      FULL = false
+    elseif type(value) == "string" and value:sub(1, 1) == "-" then
+      error("Unknown option " .. value .. " (use --full or --minimal)", 0)
+    else
+      n = n + 1
+      args[n] = value
+    end
+  end
+end
 local REPO = args[1] or "mindbound/cc-ai"
 local BRANCH = args[2] or "master"
 local DIR = "/" .. fs.combine(args[3] or "/cc-ai", "")
 local STARTUP = "/startup/cc-ai.lua"
 
--- Top-level entries (directories and files) that belong to an installation
+-- Top-level entries (directories and files) that belong to an installation.
+-- An update deletes all of them, also the ones it does not install.
 local INSTALL = {
   lib = true, bin = true, docs = true, examples = true, tests = true,
   ["install.lua"] = true,
 }
+-- The entries only a full install has (about 260 KB). An update needs room
+-- for the old and the new install at once, and a computer's disk holds
+-- 1 MB by default, so the default is a minimal install.
+local FULL_ONLY = { examples = true, tests = true }
 
 if not http then
   printError("The HTTP API is disabled. Enable it in the ComputerCraft config.")
@@ -24,30 +51,95 @@ end
 
 local json = textutils.unserialiseJSON
 
-local function get(url, binary)
-  local response, err = http.get(url, nil, binary)
+-- The body of a GET request, or nil and the reason it failed
+local function fetch(url, binary, headers)
+  local response, err = http.get(url, headers, binary)
   if not response then
-    error("Download failed: " .. url .. " (" .. tostring(err) .. ")", 0)
+    return nil, tostring(err)
   end
   local body = response.readAll()
   response.close()
+  return body or ""
+end
+
+local function get(url, binary, headers)
+  local body, err = fetch(url, binary, headers)
+  if not body then
+    error("Download failed: " .. url .. " (" .. err .. ")", 0)
+  end
   return body
 end
 
-print("Installing cc-ai from " .. REPO .. " (" .. BRANCH .. ") to " .. DIR)
+-- What the previous install recorded in .version, or nil
+local PREVIOUS
+do
+  local handle = fs.open(fs.combine(DIR, ".version"), "rb")
+  if handle then
+    local info = textutils.unserialize(handle.readAll() or "")
+    handle.close()
+    if type(info) == "table" then
+      PREVIOUS = info
+    end
+  end
+end
+
+-- Without an option, an update keeps the previous choice. An install that
+-- recorded none (none yet, or an older installer) becomes minimal.
+if FULL == nil then
+  FULL = PREVIOUS ~= nil and PREVIOUS.full == true
+end
+local SET = FULL and "full" or "minimal"
+
+-- Whether this install puts a top-level entry in place
+local function installs(name)
+  return INSTALL[name] and (FULL or not FULL_ONLY[name])
+end
+
+print("Installing cc-ai (" .. SET .. ") from " .. REPO .. " (" .. BRANCH .. ") to " .. DIR)
+
+-- The branch's current commit (or the branch itself if that fails: the
+-- install still works, it is just not pinned)
+local COMMIT
+do
+  local ok, body, reason = pcall(fetch, "https://api.github.com/repos/" .. REPO .. "/commits/" .. BRANCH, true,
+    { Accept = "application/vnd.github.sha" })
+  if not ok then
+    -- Ctrl+T while waiting for the reply cancels the install
+    if body == "Terminated" then error(body, 0) end
+    reason, body = tostring(body), nil
+  end
+  local sha = type(body) == "string" and body:match("^%s*(%x+)%s*$")
+  if sha and select(2, sha:find("$")) == 40 then
+    COMMIT = sha:lower()
+  else
+    printError("Could not look up the commit of " .. BRANCH .. " (" .. (reason or "unexpected reply") ..
+      "); downloading by branch name.")
+  end
+end
+local REF = COMMIT or BRANCH
 
 -- List the repository's files
-local treeUrl = "https://api.github.com/repos/" .. REPO .. "/git/trees/" .. BRANCH .. "?recursive=1"
+local treeUrl = "https://api.github.com/repos/" .. REPO .. "/git/trees/" .. REF .. "?recursive=1"
 local tree = json(get(treeUrl, true))
 if type(tree) ~= "table" or type(tree.tree) ~= "table" then
   error("Unexpected response listing " .. REPO, 0)
 end
 
-local files = {}
+-- The files to install, and the disk space they take as CC: Tweaked counts
+-- it: each file at least 500 bytes and each directory 500 (the first 500
+-- is the staging directory)
+local files, needed, dirs = {}, 500, {}
 for _, entry in ipairs(tree.tree) do
   local top = entry.path:match("^[^/]+")
-  if entry.type == "blob" and top and INSTALL[top] then
+  if entry.type == "blob" and top and installs(top) then
     table.insert(files, entry.path)
+    needed = needed + math.max(tonumber(entry.size) or 0, 500)
+    local dir = fs.getDir(entry.path)
+    while dir ~= "" and not dirs[dir] do
+      dirs[dir] = true
+      needed = needed + 500
+      dir = fs.getDir(dir)
+    end
   end
 end
 if #files == 0 then
@@ -61,7 +153,116 @@ if fs.exists(STAGING) then
   fs.delete(STAGING)
 end
 
-local rawBase = "https://raw.githubusercontent.com/" .. REPO .. "/" .. BRANCH .. "/"
+-- The disk space a file or directory takes
+local function diskSize(path)
+  if not fs.isDir(path) then
+    return math.max(fs.getSize(path), 500)
+  end
+  local total = 500
+  for _, name in ipairs(fs.list(path)) do
+    total = total + diskSize(fs.combine(path, name))
+  end
+  return total
+end
+
+-- The previous install's entries that this one leaves out (examples/ and
+-- tests/ when a full install becomes minimal). cc-code does not need them,
+-- so they are deleted before the download and their space counts as free.
+local dropped, freed = {}, 0
+for name in pairs(INSTALL) do
+  local path = fs.combine(DIR, name)
+  if not installs(name) and fs.exists(path) then
+    table.insert(dropped, path)
+    freed = freed + diskSize(path)
+  end
+end
+
+-- The skills folder. The installer records in .version what it put there
+-- (its top-level entries), so the next update can tell cc-ai's files from
+-- the user's.
+local SKILLS = "lib/cc-code/skills"
+local SKILLS_DIR = fs.combine(DIR, SKILLS)
+local installedSkills = {}
+do
+  local seen = {}
+  for _, path in ipairs(files) do
+    local name = path:match("^lib/cc%-code/skills/([^/]+)")
+    if name and not seen[name] then
+      seen[name] = true
+      table.insert(installedSkills, name)
+    end
+  end
+  table.sort(installedSkills)
+end
+
+-- What the previous install put into the skills folder (a set), or nil if
+-- it did not record it (an older installer, or no .version)
+local function previousSkills()
+  if not PREVIOUS or type(PREVIOUS.skills) ~= "table" then return nil end
+  local set = {}
+  for _, name in ipairs(PREVIOUS.skills) do
+    if type(name) == "string" then
+      set[name] = true
+    end
+  end
+  return set
+end
+
+-- The disk space the user's files in the skills folder will take when
+-- they are copied into the new install (see below)
+do
+  local before = previousSkills()
+  local installed = {}
+  for _, name in ipairs(installedSkills) do
+    installed[name] = true
+  end
+  local kept = 0
+  if fs.isDir(SKILLS_DIR) then
+    for _, name in ipairs(fs.list(SKILLS_DIR)) do
+      local fromCcAi
+      if before then
+        fromCcAi = before[name]
+      else
+        fromCcAi = installed[name]
+      end
+      if not fromCcAi then
+        kept = kept + diskSize(fs.combine(SKILLS_DIR, name))
+      end
+    end
+  end
+  if kept > 0 then
+    -- Folders on the way that the new install doesn't have yet
+    local dir = SKILLS
+    while dir ~= "" and not dirs[dir] do
+      kept = kept + 500
+      dir = fs.getDir(dir)
+    end
+  end
+  needed = needed + kept
+end
+
+-- Stop before changing anything if the new files don't fit next to the
+-- previous install (the download would fail with "Out of space")
+do
+  local ok, free = pcall(fs.getFreeSpace, fs.getDir(DIR))
+  if ok and type(free) == "number" and needed > free + freed then
+    local message = ("Not enough disk space: the %s install needs %d KB, but only %d KB are free."):format(
+      SET, math.ceil(needed / 1000), math.floor((free + freed) / 1000))
+    if FULL then
+      message = message .. " Free some space, or leave out the tests and examples:" ..
+        " run the installer with --minimal."
+    else
+      message = message .. " Free some space and run the installer again."
+    end
+    error(message .. " Nothing was changed.", 0)
+  end
+end
+
+for _, path in ipairs(dropped) do
+  fs.delete(path)
+end
+
+local rawBase = "https://raw.githubusercontent.com/" .. REPO .. "/" .. REF .. "/"
 local ok, err = pcall(function()
   local _, y = term.getCursorPos()
   for i, path in ipairs(files) do
@@ -86,6 +287,54 @@ if not ok then
     fs.delete(STAGING)
   end
   error(err, 0)
+end
+
+-- Files the user put into the installed skills folder (older docs said
+-- to) are copied into the new install instead of being deleted with the
+-- old lib/: every entry the previous install did not put there. (Without
+-- its list: every entry the new commit does not have.) A file whose name
+-- cc-ai now uses itself is kept under a name that does not load as a skill.
+local keptSkills, renamedSkills = {}, {}
+local keepOk, keepErr = pcall(function()
+  if not fs.isDir(SKILLS_DIR) then return end
+  local before = previousSkills()
+  local own, clashing = {}, {}
+  local names = fs.list(SKILLS_DIR)
+  table.sort(names)
+  for _, name in ipairs(names) do
+    local upstream = fs.exists(fs.combine(STAGING, SKILLS .. "/" .. name))
+    local fromCcAi
+    if before then
+      fromCcAi = before[name]
+    else
+      fromCcAi = upstream
+    end
+    if not fromCcAi then
+      table.insert(upstream and clashing or own, name)
+    end
+  end
+  if #own + #clashing == 0 then return end
+  fs.makeDir(fs.combine(STAGING, SKILLS))
+  for _, name in ipairs(own) do
+    fs.copy(fs.combine(SKILLS_DIR, name), fs.combine(STAGING, SKILLS .. "/" .. name))
+    table.insert(keptSkills, name)
+  end
+  for _, name in ipairs(clashing) do
+    local newName, n = name .. ".user", 1
+    while fs.exists(fs.combine(STAGING, SKILLS .. "/" .. newName)) do
+      n = n + 1
+      newName = name .. ".user" .. n
+    end
+    fs.copy(fs.combine(SKILLS_DIR, name), fs.combine(STAGING, SKILLS .. "/" .. newName))
+    table.insert(keptSkills, newName)
+    table.insert(renamedSkills, { from = name, to = newName })
+  end
+end)
+if not keepOk then
+  if fs.exists(STAGING) then
+    fs.delete(STAGING)
+  end
+  error("Could not keep your files in /" .. SKILLS_DIR .. ": " .. tostring(keepErr), 0)
 end
 
 -- Replace the previous install's managed entries (removes stale files)
@@ -116,7 +365,45 @@ shell.setCompletionFunction(fs.combine(binDir, "cc-code.lua"), function(_, index
 end)
 ]]):format(binDir)
 
-print("Installed " .. #files .. " files. Update later with: " .. fs.combine(DIR, "install"))
+-- Which commit is installed (cc-code shows it at startup), and for the next
+-- update: what the installer put into the skills folder, and whether the
+-- install is full
+do
+  local handle = fs.open(fs.combine(DIR, ".version"), "wb")
+  if handle then
+    handle.write(textutils.serialize({
+      repo = REPO,
+      branch = BRANCH,
+      commit = COMMIT,
+      installed = os.date("!%Y-%m-%d %H:%M UTC"),
+      skills = installedSkills,
+      full = FULL,
+    }))
+    handle.close()
+  end
+end
+
+-- The command that updates this install (with its repository, branch and
+-- directory when they are not the defaults, which a bare run would use)
+local installer = "/" .. fs.combine(DIR, "install")
+local where = ""
+if REPO ~= "mindbound/cc-ai" or BRANCH ~= "master" or DIR ~= "/cc-ai" then
+  where = " " .. REPO .. " " .. BRANCH .. " " .. DIR
+end
+print("Installed " .. #files .. " files (" .. SET .. ")" .. (COMMIT and (" from commit " .. COMMIT:sub(1, 7)) or "") ..
+  ". Update later with: " .. installer .. where)
+if not FULL then
+  print("The tests and examples were left out to save disk space. To install them: " ..
+    installer .. " --full" .. where)
+end
+if #keptSkills > 0 then
+  print("Kept your files in /" .. SKILLS_DIR .. ": " .. table.concat(keptSkills, ", "))
+  for _, rename in ipairs(renamedSkills) do
+    print("cc-ai now has its own " .. rename.from .. ", so yours is kept as " .. rename.to ..
+      " (it does not load as a skill).")
+  end
+  print("Move them to /.cc-code/skills, which updates never touch.")
+end
 
 if fs.exists("/startup") and not fs.isDir("/startup") then
   -- A plain /startup file exists, so there is no startup directory to add to

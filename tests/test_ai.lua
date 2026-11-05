@@ -239,6 +239,494 @@ return function(T)
     T.raises(function() ai.streamText({ model = "a/b", prompt = "x" }) end, "Upstream provider overloaded")
   end)
 
+  T.test("custom provider: replies that are not an event stream", function()
+    local custom = require("ai.custom")
+    settings.set("AI_CUSTOM_BASE_URL", "https://example.test/v1")
+    local model = custom("m")
+    local function generate()
+      return ai.generateText({ model = model, prompt = "x" })
+    end
+    -- A server that ignores stream=true and answers with plain JSON
+    mock.reset()
+    mock.push({ body = chat("plain answer") })
+    local r = generate()
+    T.eq(r.text, "plain answer")
+    T.eq(r.finishReason, "stop")
+    -- An error object sent with HTTP 200
+    mock.push({ body = { error = { message = "Model not found: m" } } })
+    T.raises(generate, "Model not found: m")
+    -- An HTML page (a wrong base URL)
+    mock.push({ body = "<!DOCTYPE html>\n<html><head><title>Welcome</title></head>\n<body>Hi</body></html>" })
+    local err = T.raises(generate, "Expected an event stream from example.test")
+    T.contains(err, "<!DOCTYPE html> <html>")
+    -- Nothing at all
+    mock.push({ body = "" })
+    T.raises(generate, "was empty")
+    -- "data:" without the space is still an event stream
+    mock.push({ body = "data:" .. json.encode({ choices = { { delta = { content = "no space" }, finish_reason = "stop" } } }) .. "\n\ndata:[DONE]\n\n" })
+    r = generate()
+    T.eq(r.text, "no space")
+    -- A stream that stops without [DONE] or a finish reason ended early
+    mock.push({ body = mock.sse({ { choices = { { delta = { content = "Partial ans" } } } } }, false) })
+    r = generate()
+    T.eq(r.text, "Partial ans")
+    T.eq(r.finishReason, "incomplete")
+    -- [DONE] alone (no finish reason) is a proper end
+    mock.push({ body = mock.sse({ { choices = { { delta = { content = "Whole" } } } } }, true) })
+    r = generate()
+    T.eq(r.finishReason, nil)
+    -- A chunk object without "data:" framing is no event stream either
+    -- (and is not mistaken for a whole completion)
+    mock.push({ body = { object = "chat.completion.chunk", choices = { { delta = { content = "x" }, finish_reason = "stop" } } } })
+    err = T.raises(generate, "Expected an event stream from example.test")
+    T.contains(err, "chat.completion.chunk")
+    T.ok(not err:find("%.lua:%d"), "no Lua error position: " .. err)
+    mock.push({ body = { choices = { 1 } } })
+    err = T.raises(generate, "Expected an event stream from example.test")
+    T.ok(not err:find("%.lua:%d"), "no Lua error position: " .. err)
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  -- One SSE event per JSON-able value
+  local function event(e)
+    return "data: " .. json.encode(e) .. "\n\n"
+  end
+  local function textChunk(content, finish)
+    return { choices = { { delta = { content = content }, finish_reason = finish } } }
+  end
+
+  local function customModel()
+    settings.set("AI_CUSTOM_BASE_URL", "https://example.test/v1")
+    return require("ai.custom")("m")
+  end
+
+  T.test("SSE comment, event, id and retry lines before the data", function()
+    local model = customModel()
+    local function generate()
+      return ai.generateText({ model = model, prompt = "x" })
+    end
+    mock.reset()
+    -- OpenRouter's processing comments (CRLF line ends)
+    mock.push({ body = ": OPENROUTER PROCESSING\r\n\r\n: OPENROUTER PROCESSING\r\n\r\n" ..
+      mock.sse({ textChunk("Hello "), textChunk("world", "stop") }, true) })
+    local r = generate()
+    T.eq(r.text, "Hello world", "the first data chunk after the comments is kept")
+    T.eq(r.finishReason, "stop")
+    -- Field lines before each data line
+    mock.push({ body = "retry: 3000\nevent: message\nid: 1\n" .. event(textChunk("Hi ")) ..
+      "event: message\nid: 2\n" .. event(textChunk("there", "stop")) .. "id: 3\ndata: [DONE]\n\n" })
+    r = generate()
+    T.eq(r.text, "Hi there")
+    T.eq(r.finishReason, "stop")
+    -- Data payloads that are not objects (numbers, booleans, strings) are skipped
+    mock.push({ body = "data: 1\n\ndata:true\n\ndata: \"ping\"\n\n" ..
+      mock.sse({ textChunk("ok", "stop") }, true) })
+    r = generate()
+    T.eq(r.text, "ok")
+    T.eq(r.finishReason, "stop")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("a stream of keep-alive messages only is not taken for a wrong base URL", function()
+    local model = customModel()
+    local function generate()
+      return ai.generateText({ model = model, prompt = "x" })
+    end
+    local expected = "The server closed the stream before sending any data " ..
+      "(only keep-alive messages arrived from example.test)."
+    mock.reset()
+    mock.push({ body = (": keep-alive\n\n"):rep(5) })
+    local err = T.raises(generate)
+    T.eq(err, expected)
+    mock.push({ body = (": OPENROUTER PROCESSING\r\n\r\n"):rep(3) })
+    T.eq(T.raises(generate), expected, "CRLF line ends")
+    mock.push({ body = "event: ping\nid: 7\nretry: 500\n\n" })
+    T.eq(T.raises(generate), expected, "field lines without data")
+    -- streamText through another OpenAI-compatible provider
+    mock.push({ body = ": keep-alive\n\n" })
+    err = T.raises(function() ai.streamText({ model = openai("gpt-4o"), prompt = "x" }) end)
+    T.contains(err, "closed the stream before sending any data")
+    T.ok(not err:find("base URL", 1, true), "no base URL hint: " .. err)
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("comment-like lines among other lines: the other lines are read as the reply", function()
+    local model = customModel()
+    local function generate()
+      return ai.generateText({ model = model, prompt = "x" })
+    end
+    mock.reset()
+    -- An HTML page (wrong base URL) with a CSS line at column 0
+    mock.push({ body = "<!DOCTYPE html>\n<html><head><style>\n:root { --bg: #fff; }\nbody { margin: 0 }\n" ..
+      "</style></head>\n<body>Welcome</body></html>" })
+    local err = T.raises(generate, "Expected an event stream from example.test (is the base URL right?)")
+    T.contains(err, "<!DOCTYPE html> <html><head><style> body { margin: 0 }")
+    -- A plain JSON error after a keep-alive
+    mock.push({ body = ": keep-alive\n\n{\"error\":{\"message\":\"plain after comment\"}}" })
+    T.eq(T.raises(generate), "plain after comment")
+    -- A whole completion after a keep-alive
+    mock.push({ body = ": keep-alive\n\n" .. json.encode(chat("whole answer")) })
+    T.eq(generate().text, "whole answer")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("message content given as a list of parts gives the text of its text parts", function()
+    local utils = require("ai.utils")
+    -- Mistral's reasoning models: thinking, then text
+    local parts = {
+      { type = "thinking", thinking = { { type = "text", text = "2 + 2 is 4" } } },
+      { type = "text", text = "The answer " },
+      { type = "text", text = "is 4." },
+    }
+    mock.reset()
+    -- A plain reply, with a tool call: the history gets the text as a string
+    mock.push({ body = chat(parts, { tool_calls = { { id = "c1", type = "function",
+      ["function"] = { name = "get_weather", arguments = "{\"location\":\"Oslo\"}" } } } }) })
+    mock.push({ body = chat(parts) })
+    local r = ai.generateText({ model = "a/b", prompt = "2+2?", tools = { weather }, maxSteps = 2 })
+    T.eq(r.text, "The answer is 4.")
+    T.eq(mock.requests[2].json.messages[2].content, "The answer is 4.")
+    -- A server that ignores stream=true (custom provider)
+    local model = customModel()
+    mock.push({ body = chat(parts) })
+    r = ai.generateText({ model = model, prompt = "2+2?" })
+    T.eq(r.text, "The answer is 4.")
+    -- A stream whose deltas hold lists of parts
+    mock.push({ body = mock.sse({
+      { choices = { { delta = { content = { parts[1] } } } } },
+      { choices = { { delta = { content = { parts[2] } } } } },
+      { choices = { { delta = { content = { parts[3] } }, finish_reason = "stop" } } },
+    }, true) })
+    local chunks = {}
+    r = ai.streamText({ model = model, prompt = "2+2?",
+      onChunk = function(c) table.insert(chunks, c.text) end })
+    T.eq(r.text, "The answer is 4.")
+    T.eq(table.concat(chunks, "|"), "The answer |is 4.", "no chunk for the thinking part")
+    settings.unset("AI_CUSTOM_BASE_URL")
+    -- Google reads a list given as a message's content the same way
+    mock.push({ body = { candidates = { { content = { role = "model", parts = { { text = "Hi" } } }, finishReason = "STOP" } } } })
+    ai.generateText({ model = google("gemini-2.5-flash"), messages = { { role = "user",
+      content = { { type = "text", text = "Hello" }, { type = "image_url", image_url = { url = "x" } } } } } })
+    T.eq(mock.last().json.contents[1].parts[1].text, "Hello")
+    T.eq(utils.contentText(nil), "")
+    T.eq(utils.contentText(5), "")
+    T.eq(utils.contentText({ "x", { text = "no type" } }), "")
+  end)
+
+  T.test("errors sent as an SSE error: line or an error event are raised", function()
+    local model = customModel()
+    local function generate()
+      return ai.generateText({ model = model, prompt = "x" })
+    end
+    local errorLine = "error: {\"code\":500,\"message\":\"context size exceeded\"}\n\n"
+    mock.reset()
+    -- llama.cpp's error line after some data
+    mock.push({ body = event(textChunk("Partial")) .. errorLine })
+    T.eq(T.raises(generate), "context size exceeded")
+    -- ... and alone, before any data
+    mock.push({ body = errorLine })
+    T.eq(T.raises(generate), "context size exceeded", "not the wrong-base-URL message")
+    mock.push({ body = "error: {\"error\":{\"message\":\"Nested message\"}}\n\n" })
+    T.eq(T.raises(generate), "Nested message")
+    mock.push({ body = "error: model failed to load\n" })
+    T.eq(T.raises(generate), "model failed to load", "plain text")
+    -- "event: error" whose data has no "error" key, after data and alone
+    mock.push({ body = event(textChunk("Hi")) ..
+      "event: error\ndata: {\"message\":\"Rate limit reached\",\"code\":429}\n\n" })
+    T.eq(T.raises(generate), "Rate limit reached")
+    mock.push({ body = "event: error\ndata: {\"message\":\"Queue full\"}\n\n" })
+    T.eq(T.raises(generate), "Queue full")
+    mock.push({ body = "event: error\ndata: upstream timeout\n\n" })
+    T.eq(T.raises(generate), "upstream timeout")
+    -- An event name holds only until the blank line that ends its event
+    mock.push({ body = "event: error\n\n" .. mock.sse({ textChunk("fine", "stop") }, true) })
+    local r = generate()
+    T.eq(r.text, "fine")
+    -- streamText raises them too
+    mock.push({ body = event(textChunk("Partial")) .. errorLine })
+    T.raises(function() ai.streamText({ model = openai("gpt-4o"), prompt = "x" }) end, "context size exceeded")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("an empty finish_reason does not end the stream", function()
+    local model = customModel()
+    local function generate()
+      return ai.generateText({ model = model, prompt = "x" })
+    end
+    mock.reset()
+    -- A server that sends "finish_reason": "" in every chunk, cut off
+    mock.push({ body = mock.sse({ textChunk("Hel", ""), textChunk("lo", "") }, false) })
+    local r = generate()
+    T.eq(r.text, "Hello")
+    T.eq(r.finishReason, "incomplete")
+    -- ... and the same server's complete reply
+    mock.push({ body = mock.sse({ textChunk("Hel", ""), textChunk("lo", "stop") }, false) })
+    r = generate()
+    T.eq(r.finishReason, "stop")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("a tool call cut off by a stream that ended early does not run", function()
+    local model = customModel()
+    local ran = {}
+    local list = ai.tool({ name = "list", description = "List",
+      parameters = { type = "object", properties = { path = { type = "string" } } },
+      execute = function(args)
+        table.insert(ran, "list:" .. tostring(args.path))
+        return { files = { "a" } }
+      end })
+    local function call(index, id, name, arguments)
+      return { choices = { { delta = { tool_calls = { { index = index, id = id,
+        ["function"] = { name = name, arguments = arguments } } } } } } }
+    end
+    local cutMessage = "The reply ended early (the server stopped sending), so this call " ..
+      "was cut off and did not run; send it again."
+    mock.reset()
+    -- Cut right after the call's name: no finish reason, no [DONE]
+    mock.push({ body = event({ choices = { { delta = { content = "Let me list /rom." } } } }) ..
+      event(call(0, "c1", "list", "")) })
+    mock.push({ body = mock.sse({ textChunk("Done.", "stop") }, true) })
+    local r = ai.generateText({ model = model, prompt = "x", tools = { list }, maxSteps = 3 })
+    T.eq(#ran, 0, "the cut-off call did not run with no arguments")
+    T.eq(r.toolResults[1].result.error, cutMessage)
+    T.eq(r.text, "Done.")
+    local msgs = mock.requests[2].json.messages
+    T.eq(msgs[2].tool_calls[1]["function"].arguments, "{}", "blank arguments are not sent back")
+    T.contains(msgs[3].content, "cut off")
+    -- Earlier calls of the step run; the last one was cut in its arguments
+    mock.reset()
+    mock.push({ body = event(call(0, "c1", "list", "")) .. event(call(1, "c2", "list", "{\"pa")) })
+    mock.push({ body = mock.sse({ textChunk("Done.", "stop") }, true) })
+    ran = {}
+    r = ai.generateText({ model = model, prompt = "x", tools = { list }, maxSteps = 3 })
+    T.eq(table.concat(ran, ","), "list:nil", "the complete first call ran")
+    T.eq(r.toolResults[2].result.error, cutMessage)
+    -- A broken call before the last one says that the reply ended early
+    mock.reset()
+    mock.push({ body = event(call(0, "c1", "list", "{\"pa")) .. event(call(1, "c2", "list", "{\"path\":\"/\"}")) })
+    mock.push({ body = mock.sse({ textChunk("Done.", "stop") }, true) })
+    ran = {}
+    r = ai.generateText({ model = model, prompt = "x", tools = { list }, maxSteps = 3 })
+    T.contains(r.toolResults[1].result.error, "not valid JSON")
+    T.contains(r.toolResults[1].result.error, "The reply ended early")
+    T.eq(table.concat(ran, ","), "list:/", "the last call is complete JSON and runs")
+    -- A stream that ended properly: blank arguments still mean no arguments
+    mock.reset()
+    mock.push({ body = event(call(0, "c1", "list", "")) ..
+      event({ choices = { { delta = {}, finish_reason = "tool_calls" } } }) })
+    mock.push({ body = mock.sse({ textChunk("Done.", "stop") }, true) })
+    ran = {}
+    ai.generateText({ model = model, prompt = "x", tools = { list }, maxSteps = 3 })
+    T.eq(table.concat(ran, ","), "list:nil")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  -- A "list" tool that records each call's path in ran
+  local function listTool(ran)
+    return ai.tool({ name = "list", description = "List",
+      parameters = { type = "object", properties = { path = { type = "string" } } },
+      execute = function(args)
+        table.insert(ran, "list:" .. tostring(args.path))
+        return { files = { "a" } }
+      end })
+  end
+  local function callChunk(index, id, name, arguments, finish)
+    return { choices = { { delta = { tool_calls = { { index = index, id = id,
+      ["function"] = { name = name, arguments = arguments } } } }, finish_reason = finish } } }
+  end
+  local function toolCall(id, arguments)
+    return { id = id, type = "function", ["function"] = { name = "list", arguments = arguments } }
+  end
+
+  T.test("the last tool call of a reply cut at the output token limit does not run", function()
+    local model = customModel()
+    local limitMessage = "The reply hit the output token limit, so this call was cut off and " ..
+      "did not run; send it again in smaller parts (write large files in several " ..
+      "smaller write_file/edit_file calls)."
+    local ran = {}
+    mock.reset()
+    -- Streamed: cut right after the call's name
+    mock.push({ body = mock.sse({ callChunk(0, "c1", "list", ""),
+      { choices = { { delta = {}, finish_reason = "length" } } } }, true) })
+    mock.push({ body = mock.sse({ textChunk("Done.", "stop") }, true) })
+    local r = ai.generateText({ model = model, prompt = "x", tools = { listTool(ran) }, maxSteps = 3 })
+    T.eq(#ran, 0, "the cut-off call did not run with no arguments")
+    T.eq(r.toolResults[1].result.error, limitMessage)
+    T.eq(mock.requests[2].json.messages[2].tool_calls[1]["function"].arguments, "{}")
+    settings.unset("AI_CUSTOM_BASE_URL")
+    -- A plain reply: an earlier blank call runs; the last one, cut in its
+    -- arguments, gets the same message
+    ran = {}
+    mock.reset()
+    mock.push({ body = { choices = { { message = { role = "assistant", content = "",
+      tool_calls = { toolCall("a", ""), toolCall("b", "{\"path\":\"/ro") } }, finish_reason = "length" } } } })
+    mock.push({ body = chat("Done.") })
+    r = ai.generateText({ model = "a/b", prompt = "x", tools = { listTool(ran) }, maxSteps = 3 })
+    T.eq(table.concat(ran, ","), "list:nil", "the earlier blank call ran")
+    T.eq(r.toolResults[2].result.error, limitMessage)
+    T.eq(mock.requests[2].json.messages[2].tool_calls[2]["function"].arguments, "{}")
+  end)
+
+  T.test("tool call arguments go back in the history as a JSON object", function()
+    local model = customModel()
+    local ran = {}
+    mock.reset()
+    -- Streamed arguments sent decoded: an empty table (which arrives as
+    -- [] here, as rxi json writes it) and an object
+    mock.push({ body = mock.sse({ callChunk(0, "c1", "list", {}),
+      callChunk(1, "c2", "list", { path = "/rom" }, "tool_calls") }, true) })
+    mock.push({ body = mock.sse({ textChunk("Done.", "stop") }, true) })
+    ai.generateText({ model = model, prompt = "x", tools = { listTool(ran) }, maxSteps = 3 })
+    T.eq(table.concat(ran, ","), "list:nil,list:/rom")
+    local sent = mock.requests[2].json.messages[2].tool_calls
+    T.eq(sent[1]["function"].arguments, "{}", "not []")
+    T.eq(sent[2]["function"].arguments, "{\"path\":\"/rom\"}")
+    -- ... also in the stream's own result
+    mock.push({ body = mock.sse({ callChunk(0, "c1", "list", {}, "tool_calls") }, true) })
+    T.eq(model.doStream({ prompt = "x" }).toolCalls[1]["function"].arguments, "{}")
+    settings.unset("AI_CUSTOM_BASE_URL")
+    -- A plain reply: JSON lists mean no arguments, and decoded arguments
+    -- are encoded
+    ran = {}
+    mock.reset()
+    mock.push({ body = chat(nil, { tool_calls = { toolCall("a", "[]"), toolCall("b", "[\"/rom\"]"),
+      toolCall("c", {}), toolCall("d", { path = "/" }), toolCall("e", "5"), toolCall("f", "[null,\"/rom\"]") } }) })
+    mock.push({ body = chat("Done.") })
+    local r = ai.generateText({ model = "a/b", prompt = "x", tools = { listTool(ran) }, maxSteps = 3 })
+    T.eq(table.concat(ran, ","), "list:nil,list:nil,list:nil,list:/,list:nil,list:nil")
+    T.eq(r.toolResults[2].args[1], nil, "a list is not passed on")
+    sent = mock.requests[2].json.messages[2].tool_calls
+    local texts = {}
+    for i, call in ipairs(sent) do
+      texts[i] = call["function"].arguments
+    end
+    T.eq(table.concat(texts, " "), "{} {} {} {\"path\":\"/\"} {} {}", "a list starting with null is a list too")
+    -- Streamed arguments sent decoded as a list with a hole: rxi json can't
+    -- write that back, so they count as no arguments (no crash)
+    settings.set("AI_CUSTOM_BASE_URL", "https://example.test/v1")
+    mock.reset()
+    mock.push({ body = 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"h1","function":' ..
+      '{"name":"list","arguments":[null,"x"]}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n' })
+    T.eq(customModel().doStream({ prompt = "x" }).toolCalls[1]["function"].arguments, "{}")
+    settings.unset("AI_CUSTOM_BASE_URL")
+  end)
+
+  T.test("tools without arguments are sent without a parameters schema", function()
+    local function run() return { fuel = 5 } end
+    local tools = {
+      weather,
+      ai.tool({ name = "fuel_level", description = "Fuel", parameters = { type = "object", properties = {} }, execute = run }),
+      ai.tool({ name = "ping", execute = run }),
+      ai.tool({ name = "noop", parameters = {}, execute = run }),
+      ai.tool({ name = "free", parameters = { type = "object" }, execute = run }),
+    }
+    -- Every OpenAI-compatible provider builds its tools in openai-compat
+    settings.set("GROQ_API_KEY", "q-test")
+    local models = { "a/b", openai("gpt-4o"), require("ai.groq")("llama"), customModel() }
+    for _, model in ipairs(models) do
+      mock.reset()
+      mock.push({ body = chat("ok") })
+      ai.generateText({ model = model, prompt = "x", tools = tools })
+      local req = mock.last()
+      local label = ai.modelSpec(model)
+      local sent = req.json.tools
+      T.eq(#sent, 5, label)
+      T.eq(sent[1]["function"].parameters.properties.location.type, "string", label .. ": a normal tool keeps its schema")
+      T.eq(sent[2]["function"].name, "fuel_level", label)
+      T.eq(sent[2]["function"].parameters, nil, label .. ": empty properties")
+      T.eq(sent[3]["function"].parameters, nil, label .. ": no parameters")
+      T.eq(sent[4]["function"].parameters, nil, label .. ": empty parameters")
+      T.eq(sent[5]["function"].parameters.type, "object", label .. ": an object schema without properties is kept")
+      T.ok(not req.body:find("\"properties\":[]", 1, true), label .. ": " .. req.body)
+      T.ok(not req.body:find("\"parameters\":[]", 1, true), label .. ": " .. req.body)
+    end
+    settings.unset("GROQ_API_KEY")
+    settings.unset("AI_CUSTOM_BASE_URL")
+    -- Google: Gemini also rejects an object schema without properties.
+    -- The no-argument call comes back with "args": {}, which must not go
+    -- back as [], and a tool result must be an object.
+    mock.reset()
+    mock.push({ body = "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[" ..
+      "{\"functionCall\":{\"name\":\"fuel_level\",\"args\":{}}}," ..
+      "{\"functionCall\":{\"name\":\"noop\",\"args\":{}}}]},\"finishReason\":\"STOP\"}]}" })
+    mock.push({ body = { candidates = { { content = { role = "model", parts = { { text = "5 fuel" } } }, finishReason = "STOP" } } } })
+    local emptyResult = ai.tool({ name = "noop", parameters = {}, execute = function() return {} end })
+    local gtools = { tools[1], tools[2], tools[3], emptyResult, tools[5] }
+    local r = ai.generateText({ model = google("gemini-2.5-flash"), prompt = "Fuel?", tools = gtools, maxSteps = 2 })
+    T.eq(r.text, "5 fuel")
+    T.eq(r.toolResults[1].result.fuel, 5, "the no-argument tool ran")
+    local decls = mock.requests[1].json.tools[1].functionDeclarations
+    T.eq(decls[1].parameters.properties.location.type, "string")
+    T.eq(decls[2].parameters, nil)
+    T.eq(decls[3].parameters, nil)
+    T.eq(decls[4].parameters, nil)
+    T.eq(decls[5].parameters, nil, "no properties")
+    local body = mock.requests[2].body
+    T.ok(not body:find("\"args\":[]", 1, true), "empty args are dropped: " .. body)
+    T.contains(body, "\"response\":{\"result\":[]}", "an empty result is wrapped in an object")
+    T.contains(body, "\"response\":{\"fuel\":5}")
+  end)
+
+  T.test("empty properties of nested object parameters are left out", function()
+    local utils = require("ai.utils")
+    local params = { type = "object", required = { "name" }, properties = {
+      name = { type = "string" },
+      opts = { type = "object", properties = {} },
+      list = { type = "array", items = { type = "object",
+        properties = { deep = { type = "object", properties = {} } } } },
+    } }
+    local tool = ai.tool({ name = "nested", parameters = params, execute = function() return {} end })
+    mock.reset()
+    mock.push({ body = chat("ok") })
+    ai.generateText({ model = "a/b", prompt = "x", tools = { tool } })
+    local req = mock.last()
+    T.ok(not req.body:find("\"properties\":[]", 1, true), req.body)
+    local sent = req.json.tools[1]["function"].parameters
+    T.eq(sent.required[1], "name")
+    T.eq(sent.properties.name.type, "string")
+    T.eq(sent.properties.opts.type, "object")
+    T.eq(sent.properties.opts.properties, nil)
+    T.eq(sent.properties.list.items.properties.deep.type, "object")
+    T.eq(sent.properties.list.items.properties.deep.properties, nil)
+    T.eq(type(params.properties.opts.properties), "table", "the tool's own schema is unchanged")
+    T.eq(type(params.properties.list.items.properties.deep.properties), "table")
+    mock.push({ body = { candidates = { { content = { role = "model", parts = { { text = "ok" } } }, finishReason = "STOP" } } } })
+    ai.generateText({ model = google("gemini-2.5-flash"), prompt = "x", tools = { tool } })
+    T.ok(not mock.last().body:find("\"properties\":[]", 1, true), "Google: " .. mock.last().body)
+    -- Also under anyOf/oneOf/allOf, additionalProperties and tuple items
+    local wide = utils.toolParameters({ type = "object", properties = {
+      pick = { anyOf = { { type = "object", properties = {} }, { type = "string" } } },
+      map = { type = "object", additionalProperties = { type = "object", properties = {} } },
+      pair = { type = "array", items = { { type = "object", properties = {} }, { type = "number" } } },
+    } })
+    T.eq(wide.properties.pick.anyOf[1].properties, nil)
+    T.eq(wide.properties.pick.anyOf[2].type, "string")
+    T.eq(wide.properties.map.additionalProperties.properties, nil)
+    T.eq(wide.properties.pair.items[1].properties, nil)
+    T.eq(wide.properties.pair.items[2].type, "number")
+    T.ok(not json.encode(wide):find("[]", 1, true), json.encode(wide))
+    -- A schema that refers to itself does not loop forever
+    local loop = { type = "object", properties = { name = { type = "string" } } }
+    loop.properties.child = loop
+    T.eq(utils.toolParameters(loop).properties.child, loop)
+  end)
+
+  T.test("plain replies with unexpected shapes give clear errors", function()
+    mock.reset()
+    mock.push({ body = { error = "Model overloaded" } })
+    T.eq(T.raises(function() ai.generateText({ model = "a/b", prompt = "x" }) end), "Model overloaded")
+    mock.push({ body = { choices = { { finish_reason = "stop" } } } })
+    local err = T.raises(function() ai.generateText({ model = "a/b", prompt = "x" }) end, "has no message")
+    T.ok(not err:find("%.lua:%d"), "no Lua error position: " .. err)
+    mock.push({ body = { choices = {} } })
+    err = T.raises(function() ai.generateText({ model = "a/b", prompt = "x" }) end, "No choices")
+    T.ok(not err:find("%.lua:%d"), "no Lua error position: " .. err)
+    -- Google's stream skips data that is not an object
+    mock.push({ body = "data: 1\n\n" .. mock.sse({ { candidates = { { content = { parts = { { text = "Hi" } } }, finishReason = "STOP" } } } }) })
+    local r = ai.streamText({ model = google("gemini-2.5-flash"), prompt = "x" })
+    T.eq(r.text, "Hi")
+  end)
+
   T.test("a reply that was cut short gives a short, clear error", function()
     mock.reset()
     local full = json.encode(chat("The answer \226\128\148 forty-two"))
@@ -358,7 +846,8 @@ return function(T)
     T.eq(ran, 0, "write_file did not run")
     T.contains(r.toolResults[1].result.error, "not valid JSON")
     T.contains(r.toolResults[1].result.error, "output token limit")
-    T.eq(r.toolResults[2].result.gotTable, true, "blank arguments mean no arguments")
+    T.contains(r.toolResults[2].result.error, "output token limit, so this call was cut off and did not run",
+      "the last call, blank, was cut at the limit")
     local msgs = mock.requests[2].json.messages
     T.eq(msgs[2].tool_calls[1]["function"].arguments, "{}", "broken JSON is not sent back")
   end)

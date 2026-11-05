@@ -30,7 +30,7 @@ YouTube: https://youtu.be/u-gIQOXLimQ
 wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
-This installs everything into `/cc-ai` and adds `/startup/cc-ai.lua`, which puts `cc-code` on the shell path.
+This installs cc-code and the AI SDK into `/cc-ai` and adds `/startup/cc-ai.lua`, which puts `cc-code` on the shell path. The tests and examples are left out to save disk space: add `--full` to install them (see Installation below).
 
 ### Setup
 
@@ -148,7 +148,25 @@ print(result.object.name, result.object.age)
 wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
-Update later with `/cc-ai/install` (the installer installs itself), or by running the `wget` command again. To install from a fork, a branch or another directory, use `install [owner/repo] [branch] [directory]`.
+Update later with `/cc-ai/install` (the installer installs itself), or by running the `wget` command again. To install from a fork, a branch or another directory, use `install [--full | --minimal] [owner/repo] [branch] [directory]`.
+
+There are two install sets:
+
+- **Minimal** (the default): `lib/`, `bin/`, `docs/` and the installer, about 350 KB. This is all cc-code and the AI SDK need.
+- **Full**: also `tests/` and `examples/`, about 610 KB. The in-game test run (`/cc-ai/tests/run`, `/cc-ai/tests/http-check`) needs it.
+
+Choose with `--full` or `--minimal` anywhere in the arguments, for example `/cc-ai/install --full` or `wget run <url> --full`. The installer records the choice in `/cc-ai/.version`, and an update without an option keeps it. An update to a minimal install deletes `tests/` and `examples/`.
+
+Why minimal is the default: an update downloads the new files next to the old install and replaces it only when every file has arrived, so it needs room for both. A computer's disk holds 1 MB by default (`computer_space_limit` in the server config), which is not enough for two full installs. Before it downloads, the installer checks the free space. If the new files don't fit, it stops, says how many KB it needs and how many are free, and changes nothing: free some space, or use a minimal install. An update from a full to a minimal install deletes `tests/` and `examples/` first, so the download can use their space.
+
+The installer looks up the branch's current commit and downloads every file from that commit, so an update right after a push can't mix old and new files (raw.githubusercontent.com caches branch URLs for about 5 minutes). It writes the commit to `/cc-ai/.version`, and cc-code shows it at startup, for example `Welcome to cc-code v0.2.0 (f3e7a15)`. GitHub's file listing can itself be up to a minute old, so a push may take that long to show up.
+
+Put your own cc-code skills in `/.cc-code/skills/`: updates replace everything in `/cc-ai/lib`. If you put files into `/cc-ai/lib/cc-code/skills/` anyway, the installer keeps them, says so, and renames a file whose name cc-ai starts to use itself (for example to `tools.lua.user`, which does not load).
+
+**Updating an older install (once):** if `/cc-ai/.version` does not exist, `/cc-ai/install` is an older installer. It deletes everything in `/cc-ai/lib`, your skills there too, and within about 5 minutes of a push it can mix old and new files. So:
+
+1. Move your own skills from `/cc-ai/lib/cc-code/skills/` to `/.cc-code/skills/`, for example `mv /cc-ai/lib/cc-code/skills/fuel.lua /.cc-code/skills/fuel.lua`.
+2. Wait until the last push is at least 5 minutes old. Then update with the `wget run` command above. It runs the new installer, which makes a minimal install (add `--full` for the tests and examples). Running `/cc-ai/install` twice also works, but the first run, by the older installer, downloads everything (about 610 KB) next to the old install, which may not fit on a 1 MB disk. The second run, by the new installer, makes the install minimal, because the older installer recorded no choice.
 
 ### Manual
 
@@ -157,6 +175,8 @@ Copy `lib/`, `bin/` and `docs/` to `/cc-ai/` on the computer (for example by dra
 ```lua
 shell.setPath(shell.path() .. ":/cc-ai/bin")
 ```
+
+If you used the installer before, delete `/cc-ai/.version` (`rm /cc-ai/.version`). Otherwise cc-code still shows the commit the installer put there, not the version you copied.
 
 ## API Keys
 
@@ -194,11 +214,11 @@ The offline test suite uses a fake HTTP API, so it needs no keys or network. Run
 .\tests\run.ps1
 ```
 
-You can also run it in-game with `/cc-ai/tests/run`.
+You can also run it in-game with `/cc-ai/tests/run`. The tests are only in a full install: run `/cc-ai/install --full` first.
 
 `tests/live.ps1 -Provider <gateway|google|openai|groq|custom> -Model <model>` runs live checks against a real API (text, streaming, tools, structured output and a full agent task). Keys are read from the emulator data directory's settings, which you set yourself in the emulator: see the top of `tests/live.ps1`.
 
-`/cc-ai/tests/http-check [model]` checks in-game whether the custom endpoint's replies arrive complete, with and without streaming.
+`/cc-ai/tests/http-check [model]` checks in-game whether the custom endpoint's replies arrive complete, with and without streaming. It also needs a full install.
 
 ## License
 

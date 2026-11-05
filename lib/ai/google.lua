@@ -15,7 +15,8 @@ local function buildContents(opts)
       if role ~= "system" then
         table.insert(contents, {
           role = role,
-          parts = msg.parts or { { text = msg.content } },
+          -- Content may be a list of parts (see utils.contentText)
+          parts = msg.parts or { { text = utils.contentText(msg.content) } },
         })
       end
     end
@@ -28,20 +29,35 @@ local function buildContents(opts)
   return contents
 end
 
+-- A tool without arguments is declared without "parameters": Gemini
+-- rejects an object schema whose properties are empty (or missing), and
+-- rxi json would send empty properties as [] (see utils.toolParameters)
 local function buildTools(tools)
   if not tools then return nil end
   local declarations = {}
   for _, tool in ipairs(tools) do
-    if tool.type == "function" then
+    if type(tool) == "table" and tool.type == "function" and type(tool["function"]) == "table" then
+      local fn = tool["function"]
       table.insert(declarations, {
-        name = tool["function"].name,
-        description = tool["function"].description,
-        parameters = tool["function"].parameters,
+        name = fn.name,
+        description = fn.description,
+        parameters = utils.toolParameters(fn.parameters, true),
       })
     end
   end
   if #declarations == 0 then return nil end
   return { { functionDeclarations = declarations } }
+end
+
+-- A function call part as it goes back in the history. The call of a tool
+-- without arguments may come with "args": {}, which rxi json would send
+-- back as [] (Gemini rejects that): drop the empty args.
+local function cleanPart(part)
+  local call = part.functionCall
+  if type(call) == "table" and type(call.args) == "table" and next(call.args) == nil then
+    call.args = nil
+  end
+  return part
 end
 
 local function parseResponse(response)
@@ -56,6 +72,7 @@ local function parseResponse(response)
 
   if content and content.parts then
     for i, part in ipairs(content.parts) do
+      cleanPart(part)
       if part.text then
         text = text .. part.text
       end
@@ -148,10 +165,16 @@ local function createLanguageModel(modelId, config)
   end
 
   function model.formatToolResult(toolCall, result)
+    -- Gemini takes an object here. rxi json sends an empty table (or a
+    -- list) as an array, and a string is no object, so wrap those.
+    local response = result
+    if type(response) ~= "table" or next(response) == nil or response[1] ~= nil then
+      response = { result = response == nil and "" or response }
+    end
     return {
       functionResponse = {
         name = toolCall["function"].name,
-        response = result,
+        response = response,
       },
     }
   end
@@ -227,10 +250,11 @@ local function createLanguageModel(modelId, config)
         if line:sub(1, 6) == "data: " then
           local data = line:sub(7)
           local ok, parsed = pcall(json.decode, data)
-          if ok and parsed.candidates then
+          if ok and type(parsed) == "table" and type(parsed.candidates) == "table" then
             local candidate = parsed.candidates[1]
             if candidate and candidate.content and candidate.content.parts then
               for i, part in ipairs(candidate.content.parts) do
+                cleanPart(part)
                 if part.text then
                   fullText = fullText .. part.text
                   table.insert(rawParts, part)

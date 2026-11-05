@@ -27,9 +27,11 @@ return skills.create({
       "    /model openai <model>     - Use OpenAI directly",
       "    /model groq <model>       - Use Groq directly",
       "    /model custom <model>     - Use AI_CUSTOM_BASE_URL",
-      "  /turtle <prompt> - Ask turtle programming question with context",
+      "  /turtle [prompt] - Add the turtle API reference, then ask",
       "    /turtle write a mining script    - Quick reference",
-      "    /turtle full <prompt>            - Use full API docs",
+      "    /turtle full <prompt>            - Full API docs",
+      "  /tools short|full|off - How tool calls are shown",
+      "    (short: one line per call, ! marks a failed one)",
       "  /clear          - Clear conversation history",
       "  /exit, /quit    - Exit cc-code",
       "",
@@ -48,7 +50,9 @@ return skills.create({
       "  - Type naturally to ask for help with code",
       "  - Use PageUp/PageDown or the mouse wheel to scroll",
       "  - Hold Ctrl+T to cancel a request, or to exit at the prompt",
-      "  - API keys: exit, then run: set <KEY_NAME> <key>",
+      "  - API keys: !set <KEY_NAME> <key> (tool results blank out key values)",
+      "  - Your own skills: /.cc-code/skills (all directories) or",
+      "    .cc-code/skills (this directory)",
     }
     -- Return nil to prevent sending to AI, handle directly
     return nil, table.concat(lines, "\n")

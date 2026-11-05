@@ -3,7 +3,23 @@
 
 local json = require("cmn-utils.json")
 
-local T = { passed = 0, failed = 0, failures = {}, log = {} }
+local T = { passed = 0, failed = 0, skipped = 0, failures = {}, log = {} }
+
+-- The real "CC: Tweaked Unicode Support" mod is installed (a run in such a
+-- game). Its global `unicode` can't be hidden from the code under test: the
+-- mod's window API and VM use it too. Tests of vanilla behaviour are then
+-- skipped (T.vanillaOnly). Checked before any test sets the fake one.
+T.realUnicodeMod = type(rawget(_G, "unicode")) == "table"
+
+-- Raised by T.vanillaOnly to skip the rest of a test
+local SKIP = {}
+
+-- Call first in a test that checks vanilla CC: Tweaked behaviour
+function T.vanillaOnly()
+  if T.realUnicodeMod then
+    error(SKIP, 0)
+  end
+end
 
 function T.print(msg)
   table.insert(T.log, msg)
@@ -11,7 +27,10 @@ end
 
 function T.test(name, fn)
   local ok, err = pcall(fn)
-  if ok then
+  if not ok and err == SKIP then
+    T.skipped = T.skipped + 1
+    T.print("  skip " .. name .. " (needs vanilla CC: Tweaked: the Unicode mod is installed)")
+  elseif ok then
     T.passed = T.passed + 1
     T.print("  ok   " .. name)
   else
@@ -190,7 +209,10 @@ end
 mock.routes = {}
 function mock.get(req, headers, binary)
   local url = type(req) == "table" and req.url or req
-  table.insert(mock.requests, { url = url, method = "GET", binary = binary })
+  if type(req) == "table" then
+    headers, binary = req.headers, req.binary
+  end
+  table.insert(mock.requests, { url = url, method = "GET", binary = binary, headers = headers })
   local body = mock.routes[url]
   if body == nil then
     return nil, "Not Found", makeHandle(404, "")
@@ -276,6 +298,10 @@ end
 T.tmp = "/cc-ai-test-tmp"
 
 function T.resetTmp()
+  -- Close file handles the rom's error printer left open (a file still
+  -- open can't be deleted on a Windows host). CC: Tweaked has no
+  -- collectgarbage; CraftOS-PC does.
+  if collectgarbage then collectgarbage() end
   if fs.exists(T.tmp) then fs.delete(T.tmp) end
   fs.makeDir(T.tmp)
 end

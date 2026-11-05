@@ -29,18 +29,18 @@ http = { post = T.http.post, get = T.http.get, request = T.http.request, checkUR
 local savedSettings = {}
 local SAVED = { "AI_GATEWAY_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
   "AI_CUSTOM_API_KEY", "AI_CUSTOM_BASE_URL", "ai.http_timeout",
-  "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens" }
+  "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens", "cc-code.tools" }
 for _, name in ipairs(SAVED) do
   savedSettings[name] = settings.get(name)
 end
-for _, name in ipairs({ "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens" }) do
+for _, name in ipairs({ "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens", "cc-code.tools" }) do
   settings.unset(name)
 end
 local realSave = settings.save
 T.saves = 0
 settings.save = function() T.saves = T.saves + 1 return true end
 
-local suites = { "test_files", "test_capture", "test_ai", "test_agent", "test_install", "test_ui" }
+local suites = { "test_files", "test_capture", "test_ai", "test_agent", "test_install", "test_skills", "test_ui" }
 local only = args[1]
 
 for _, name in ipairs(suites) do
@@ -61,6 +61,12 @@ for _, name in ipairs(suites) do
           T.print("  FAIL suite crashed: " .. tostring(suiteErr))
         end
       end
+      -- The rom's error printer (cc.internal.exception) opens the source of
+      -- a program that errors, to show the line, and never closes it. Until
+      -- the handle is collected, Windows can't delete that file, so the
+      -- next suite's T.resetTmp (or the clean-up below) would fail. (Seen
+      -- in CraftOS-PC on Windows; CC: Tweaked has no collectgarbage.)
+      if collectgarbage then collectgarbage() end
     end
   end
 end
@@ -73,9 +79,18 @@ for _, name in ipairs(SAVED) do
   local value = savedSettings[name]
   if value == nil then settings.unset(name) else settings.set(name, value) end
 end
-if fs.exists(T.tmp) then fs.delete(T.tmp) end
+-- A file still open makes the delete fail: report it, and still write the
+-- results below
+local deleted, deleteErr = pcall(function()
+  if fs.exists(T.tmp) then fs.delete(T.tmp) end
+end)
+if not deleted then
+  T.print("")
+  T.print("warning: could not delete " .. T.tmp .. ": " .. tostring(deleteErr))
+end
 
-local summary = string.format("%d passed, %d failed", T.passed, T.failed)
+local summary = string.format("%d passed, %d failed", T.passed, T.failed) ..
+  (T.skipped > 0 and (", " .. T.skipped .. " skipped") or "")
 T.print("")
 T.print(summary)
 for _, f in ipairs(T.failures) do

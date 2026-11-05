@@ -43,6 +43,7 @@ return function(T)
   end)
 
   T.test("text width/sub count cells; forDisplay depends on the unicode mod", function()
+    T.vanillaOnly()
     local s = "caf\233 \226\128\148 ok"                          -- é as Latin-1, em dash as UTF-8
     -- Vanilla: one byte per cell
     T.eq(text.unicodeTerminal(), false)
@@ -123,6 +124,58 @@ return function(T)
     T.eq(#r, 1)
   end)
 
+  T.test("grep's glob matches paths when it has a /, file names when not", function()
+    local function files(r)
+      local out = {}
+      for _, m in ipairs(r.results) do out[#out + 1] = m.file end
+      return table.concat(out, ",")
+    end
+    T.eq(files(grep.search("return", { path = root, glob = "**/*.lua" })), "lib/a.lua,lib/sub/b.lua")
+    T.eq(files(grep.search("return", { path = root, glob = "lib/sub/*.lua" })), "lib/sub/b.lua")
+    T.eq(files(grep.search("return", { path = root, glob = "lib/*.lua" })), "lib/a.lua")
+    T.eq(files(grep.search("return", { path = root, glob = "b.lua" })), "lib/sub/b.lua", "name at any depth")
+    T.eq(files(grep.search("return", { path = root .. "/lib/sub/b.lua", glob = "*.lua" })), "b.lua", "single file")
+    T.eq(#grep.search("return", { path = root, glob = "*.txt" }).results, 0)
+  end)
+
+  T.test("globs take ./ and / prefixes, a trailing /, ? and {a,b}", function()
+    local function found(pattern)
+      return table.concat(glob.find(pattern, root).matches, ",")
+    end
+    T.eq(found("./lib/*.lua"), "lib/a.lua")
+    T.eq(found("/lib/*.lua"), "lib/a.lua")
+    T.eq(found("./*.lua"), "startup.lua")
+    T.eq(found("lib/"), "lib/a.lua,lib/sub/b.lua", "a folder: everything under it")
+    T.eq(found("*.{lua,txt}"), "notes.txt,startup.lua")
+    T.eq(found("{lib,lib/sub}/*.lua"), "lib/a.lua,lib/sub/b.lua")
+    T.eq(found("**/{a,b}.{lua,txt}"), "lib/a.lua,lib/sub/b.lua", "several groups")
+    T.eq(found("?tartup.lua"), "startup.lua")
+    T.eq(found("lib/?.lua"), "lib/a.lua")
+    T.eq(found("lib?a.lua"), "", "? does not match /")
+    T.eq(found("{lib}/a.lua"), "", "braces without a comma are plain text")
+    T.contains(glob.find(nil, root).error, "pattern")
+    -- The same globs filter grep
+    local function files(r)
+      local out = {}
+      for _, m in ipairs(r.results) do out[#out + 1] = m.file end
+      return table.concat(out, ",")
+    end
+    T.eq(files(grep.search("[Hh]ello", { path = root, glob = "*.{txt,md}" })), "notes.txt,notes.txt")
+    T.eq(files(grep.search("return", { path = root, glob = "./lib/*.lua" })), "lib/a.lua")
+    T.eq(files(grep.search("return", { path = root, glob = "lib/" })), "lib/a.lua,lib/sub/b.lua")
+    T.eq(files(grep.search("return", { path = root, glob = "{lib/sub/*.lua,*.txt}" })), "lib/sub/b.lua")
+    -- A path glob names files under a directory: searching one file ignores it
+    local r = grep.search("return", { path = root .. "/lib/a.lua", glob = "lib/*.lua" })
+    T.eq(files(r), "a.lua")
+    T.eq(r.note, nil)
+    -- A glob that matches no file at all says so; one that matched files doesn't
+    r = grep.search("return", { path = root, glob = "*.{xyz,abc}" })
+    T.eq(#r.results, 0)
+    T.contains(r.note, "No file matched the glob")
+    T.eq(grep.search("zzz", { path = root, glob = "*.lua" }).note, nil)
+    T.contains(grep.search("return", { path = root, glob = 5 }).error, "glob must be a string")
+  end)
+
   T.test("read_file returns numbered lines with offset and limit", function()
     local r = run("read_file", { path = root .. "/notes.txt" })
     T.eq(r.content, "   1\tHello World\n   2\tsecond line\n   3\thello again")
@@ -151,6 +204,50 @@ return function(T)
     T.ok(not fs.exists(root .. "/n.txt"))
   end)
 
+  T.test("edit_file on a read-only file says so (not that the disk is full)", function()
+    -- A read-only disk reports 0 bytes free, so a growing edit used to be
+    -- refused for lack of space
+    local romFile = "/rom/programs/fun/hello.lua"
+    local content = T.readFile(romFile)
+    T.ok(content, romFile .. " exists")
+    local r = run("edit_file", { path = romFile, old_string = content:sub(1, 5), new_string = string.rep("x", 900) })
+    T.eq(r.error, "Path is read-only: " .. romFile)
+    T.eq(T.readFile(romFile), content)
+  end)
+
+  T.test("write_file and edit_file refuse the secret marker unless the file has it", function()
+    local dir = root .. "/s"
+    local path = dir .. "/startup.lua"
+    local original = "settings.set(\"MY_API_KEY\", \"sk-abc123def456ghi\")\nprint(\"hi\")\n"
+    T.writeFile(path, original)
+    -- What read_file showed the model: the key as <redacted>
+    local r = run("edit_file", { path = path, old_string = "settings.set(\"MY_API_KEY\", \"<redacted>\")",
+      new_string = "settings.set(\"MY_API_KEY\", \"x\")" })
+    T.contains(r.error, "old_string contains <redacted>")
+    T.contains(r.error, "secret value")
+    r = run("edit_file", { path = path, old_string = "print(\"hi\")", new_string = "print(\"<redacted>\")" })
+    T.contains(r.error, "new_string contains <redacted>")
+    r = run("write_file", { path = path, content = "settings.set(\"MY_API_KEY\", \"<redacted>\")\nprint(\"hello\")\n" })
+    T.contains(r.error, "content contains <redacted>")
+    T.contains(r.error, "edit_file")
+    T.eq(T.readFile(path), original, "the key is kept")
+    r = run("write_file", { path = dir .. "/new.lua", content = "local key = \"<redacted>\"\n" })
+    T.contains(r.error, "<redacted>")
+    T.ok(not fs.exists(dir .. "/new.lua"))
+    -- The text around the secret can still be changed
+    r = run("edit_file", { path = path, old_string = "print(\"hi\")", new_string = "print(\"hello\")" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "settings.set(\"MY_API_KEY\", \"sk-abc123def456ghi\")\nprint(\"hello\")\n")
+    -- A file that really has the marker text (as cc-code's own source does)
+    local own = dir .. "/own.lua"
+    T.writeFile(own, "local MARK = \"<redacted>\"\n")
+    r = run("edit_file", { path = own, old_string = "\"<redacted>\"\n", new_string = "\"<redacted>\" -- shown\n" })
+    T.eq(r.replacements, 1)
+    r = run("write_file", { path = own, content = "local MARK = \"<redacted>\"\nreturn MARK\n" })
+    T.eq(r.success, true)
+    fs.delete(dir)
+  end)
+
   T.test("edit_file replaces unique strings and handles % literally", function()
     T.writeFile(root .. "/e.lua", "a = 1\nb = 1\nc = 2\n")
     local r = run("edit_file", { path = root .. "/e.lua", old_string = "= 1", new_string = "= 3" })
@@ -169,6 +266,151 @@ return function(T)
     T.eq(r.replacements, 1, "overlapping matches count once")
     T.eq(T.readFile(root .. "/o.txt"), "ba")
     fs.delete(root .. "/o.txt")
+  end)
+
+  T.test("edit_file matches CRLF files with plain newlines and keeps CRLF", function()
+    local path = root .. "/w/crlf.lua"
+    T.writeFile(path, "local a = 1\r\nlocal b = 2\r\nprint(a + b)\r\n")
+    -- read_file shows the file with \n line endings
+    T.eq(run("read_file", { path = path }).content, "   1\tlocal a = 1\n   2\tlocal b = 2\n   3\tprint(a + b)")
+    local r = run("edit_file", { path = path, old_string = "local b = 2\nprint(a + b)\n",
+      new_string = "local b = 3\nlocal c = 4\nprint(a + b + c)\n" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "local a = 1\r\nlocal b = 3\r\nlocal c = 4\r\nprint(a + b + c)\r\n")
+    -- A one-line match still gets CRLF in the lines it adds
+    r = run("edit_file", { path = path, old_string = "local a = 1", new_string = "local a = 1\nlocal z = 0" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "local a = 1\r\nlocal z = 0\r\nlocal b = 3\r\nlocal c = 4\r\nprint(a + b + c)\r\n")
+    -- Mixed line endings: each line matches with its own ending
+    T.writeFile(path, "x = 1\ny = 2\r\nz = 3\r\n")
+    r = run("edit_file", { path = path, old_string = "y = 2\nz = 3", new_string = "y = 5\nz = 6" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "x = 1\ny = 5\r\nz = 6\r\n")
+    r = run("edit_file", { path = path, old_string = "x = 1\ny = 5", new_string = "x = 0\ny = 5" })
+    T.eq(r.replacements, 1, "plain newlines still match as written")
+    T.eq(T.readFile(path), "x = 0\ny = 5\r\nz = 6\r\n")
+    fs.delete(root .. "/w")
+  end)
+
+  T.test("edit_file in mixed line endings matches the text read_file shows", function()
+    local path = root .. "/w/mixed.lua"
+    -- A span across an LF line and CRLF lines
+    T.writeFile(path, "a = 1\nb = 2\r\nc = 3\r\n")
+    local r = run("edit_file", { path = path, old_string = "a = 1\nb = 2\nc = 3", new_string = "a = 0\nb = 0\nc = 0" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "a = 0\r\nb = 0\r\nc = 0\r\n", "the replaced text had CRLF, so the new text gets it")
+    -- read_file shows "x\ny" twice here, once with each ending
+    T.writeFile(path, "x\ny\r\nz\r\nx\r\ny\r\n")
+    r = run("edit_file", { path = path, old_string = "x\ny", new_string = "X\nY" })
+    T.contains(r.error, "found 2 times")
+    T.eq(T.readFile(path), "x\ny\r\nz\r\nx\r\ny\r\n")
+    -- replace_all: each match keeps its own line ending
+    r = run("edit_file", { path = path, old_string = "x\ny", new_string = "X\nY", replace_all = true })
+    T.eq(r.replacements, 2)
+    T.eq(T.readFile(path), "X\nY\r\nz\r\nX\r\nY\r\n")
+    -- A match without a newline: the lines it adds get the file's most common ending
+    T.writeFile(path, "a\r\nb\r\nc\nd\r\n")
+    r = run("edit_file", { path = path, old_string = "b", new_string = "b1\nb2" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "a\r\nb1\r\nb2\r\nc\nd\r\n")
+    T.writeFile(path, "a\nb\nc\r\nd\n")
+    r = run("edit_file", { path = path, old_string = "b", new_string = "b1\nb2" })
+    T.eq(T.readFile(path), "a\nb1\nb2\nc\r\nd\n")
+    -- A match that starts and ends at CRLF newlines takes their CRs along
+    T.writeFile(path, "p\r\nq\nr\r\n")
+    r = run("edit_file", { path = path, old_string = "\nq\n", new_string = "\n" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "p\r\nr\r\n")
+    -- CRLF in old_string matches too (it is read as "\n")
+    r = run("edit_file", { path = path, old_string = "p\r\nr", new_string = "p\nq\nr" })
+    T.eq(r.replacements, 1)
+    T.eq(T.readFile(path), "p\r\nq\r\nr\r\n")
+    fs.delete(root .. "/w")
+  end)
+
+  T.test("a full disk never empties the file being written", function()
+    local path = root .. "/w/keep.lua"
+    T.writeFile(path, "original")
+    local realFree = fs.getFreeSpace
+    local ok, err = pcall(function()
+      fs.getFreeSpace = function() return 100 end
+      -- 1000 bytes in place of a file charged the 500-byte minimum: 500 more
+      local r = run("write_file", { path = path, content = string.rep("x", 1000) })
+      T.contains(r.error, "not enough disk space")
+      T.contains(r.error, "500 more bytes, 100 are free")
+      T.eq(T.readFile(path), "original")
+      r = run("edit_file", { path = path, old_string = "original", new_string = string.rep("y", 900) })
+      T.contains(r.error, "not enough disk space")
+      T.eq(T.readFile(path), "original")
+      -- Growing within the minimum file size costs nothing
+      r = run("edit_file", { path = path, old_string = "original", new_string = "changed it" })
+      T.eq(r.replacements, 1)
+      T.eq(T.readFile(path), "changed it")
+      -- A disk with no limit reports "unlimited"
+      fs.getFreeSpace = function() return "unlimited" end
+      r = run("write_file", { path = path, content = string.rep("z", 2000) })
+      T.eq(r.success, true)
+    end)
+    fs.getFreeSpace = realFree
+    fs.delete(root .. "/w")
+    if not ok then error(err, 0) end
+  end)
+
+  T.test("tool summaries: one line per call", function()
+    local view = require("cc-code.toolview")
+    local function line(name, args, result)
+      return (view.line(name, args, result))
+    end
+    T.eq(line("read_file", { path = "a.lua" }, { totalLines = 120 }), "read a.lua - 120 lines")
+    T.eq(line("read_file", { path = "a.lua", offset = 10 }, { totalLines = 1 }), "read a.lua from line 10 - 1 line")
+    T.eq(line("write_file", { path = "b.lua", content = "x" }, { bytesWritten = 1200 }), "write b.lua - 1.2 KB")
+    T.eq(line("write_file", { path = "b.lua" }, { bytesWritten = 12 }), "write b.lua - 12 bytes")
+    T.eq(line("edit_file", { path = "c.lua" }, { replacements = 2 }), "edit c.lua - 2 replacements")
+    T.eq(line("list_directory", {}, { entries = { {}, {} } }), "list . - 2 entries")
+    T.eq(line("glob", { pattern = "**/*.lua" }, { matches = { "a" } }), "glob **/*.lua - 1 file")
+    T.eq(line("grep", { pattern = "TODO", path = "lib", glob = "*.lua" }, { results = {}, truncated = false }),
+      "grep \"TODO\" in lib (*.lua) - 0 matches")
+    T.eq(line("shell", { command = "mine 3" }, { success = true, output = "Mining\nDone: 12 blocks\n\n" }),
+      "$ mine 3 - ok: Done: 12 blocks")
+    T.eq(line("shell", { command = "x" }, { success = true, output = "(no output)" }), "$ x - ok")
+    T.eq(line("shell", { command = "demo", screen = true }, { timedOut = true, screen = { size = "100x50" } }),
+      "$ demo (screen) - stopped at the timeout, screen 100x50")
+    local text, failed = view.line("shell", { command = "bad" }, { success = false, output = "bad.lua:3: oops" })
+    T.eq(text, "$ bad - failed: bad.lua:3: oops")
+    T.eq(failed, true)
+    -- A failed or stopped command shows why, not the source rows the shell
+    -- prints after an error ("\149" bullets and "\131" underlines are "?"
+    -- in UTF-8; U+2022 is a bullet too). tests/test_agent runs real ones.
+    local bullet = "\226\128\162"
+    T.eq(line("shell", { command = "bad" }, { success = false,
+      output = "starting\n/bad.lua:3: attempt to call nil\n  no file 'x'\n?Line 3\n?x()\n?" }),
+      "$ bad - failed: /bad.lua:3: attempt to call nil")
+    T.eq(line("shell", { command = "syn" }, { success = false,
+      output = "Unexpected end of file.\n\n" .. bullet .. "Line 2\n" .. bullet .. "  ??\n" .. bullet .. "Block here." }),
+      "$ syn - failed: Unexpected end of file.")
+    T.eq(line("shell", { command = "loop" }, { cancelled = true, output = "tick 2\nTerminated\n?Line 1\n?" }),
+      "$ loop - stopped (Ctrl+T): Terminated")
+    T.eq(line("shell", { command = "q" }, { success = true, output = "a.lua:1: note\n? done" }), "$ q - ok: ? done",
+      "a command that worked shows its last line")
+    -- The reason is the group right above the context rows: a tip after
+    -- them is not it, and without context rows an earlier line that looks
+    -- like an error (a caught one the program printed) is not either
+    T.eq(line("shell", { command = "syn" }, { success = false,
+      output = "Unexpected = in expression.\n\n\149Line 2\n\149  x = = 1\n\131\nTip: Wrap the preceding expression in [ and ]." }),
+      "$ syn - failed: Unexpected = in expression.")
+    T.eq(line("shell", { command = "retry" }, { success = false, output = "/x.lua:1: caught\nretrying\ngiving up" }),
+      "$ retry - failed: giving up")
+    T.eq(line("shell", { command = "log" }, { success = false,
+      output = "12:05: harvested\n/farm.lua:9: out of seeds\n?Line 9\n?" }),
+      "$ log - failed: /farm.lua:9: out of seeds")
+    text, failed = view.line("edit_file", { path = "c.lua" }, { error = "String not found in file" })
+    T.eq(text, "edit c.lua - error: String not found in file")
+    T.eq(failed, true)
+    -- Newlines never break the line; unknown (skill) tools show JSON
+    T.eq(view.call("shell", { command = "a\nb" }), "$ a b")
+    T.eq(line("my_tool", { n = 1 }, nil), "my_tool {\"n\":1} - done", "a tool that returns nothing")
+    T.eq(line("my_tool", { n = 1 }, { ok = true }), "my_tool {\"n\":1} - {\"ok\":true}")
+    T.eq(line("my_tool", {}, "done"), "my_tool - done")
   end)
 
   T.test("list_directory lists directories first with sizes", function()

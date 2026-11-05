@@ -56,67 +56,19 @@ Upgrades:
 ]=]
 end
 
-return skills.create({
-  name = "turtle",
-  description = "Load Turtle API documentation as context",
-  commands = { "/turtle" },
+-- Read the full reference (nil if it is missing)
+local function readDocs()
+  local handle = fs.exists(TURTLE_DOCS_PATH) and fs.open(TURTLE_DOCS_PATH, "rb")
+  if not handle then
+    return nil
+  end
+  local docs = handle.readAll()
+  handle.close()
+  return docs
+end
 
-  onActivate = function(agent, args)
-    -- Parse arguments to determine if "full" is specified and extract user prompt
-    local loadFull = false
-    local userPrompt = args or ""
-
-    if args and args:match("^%s*full%s+") then
-      -- "/turtle full <prompt>"
-      loadFull = true
-      userPrompt = args:match("^%s*full%s+(.+)") or ""
-    elseif args and args:match("^%s*full%s*$") then
-      -- Just "/turtle full" with no prompt
-      loadFull = true
-      userPrompt = ""
-    end
-
-    -- On turtles the systemPrompt below already carries the context every turn;
-    -- injecting it again into message history would duplicate it permanently.
-    if not loadFull and turtle then
-      if userPrompt ~= "" then
-        return userPrompt
-      end
-      return nil, "Turtle context is already active on this turtle.\n" ..
-                  "Ask turtle questions directly, or use /turtle full to load the complete API docs."
-    end
-
-    -- Build context (quick reference or full docs)
-    local context
-    if loadFull then
-      -- Try to load full documentation
-      local handle = fs.exists(TURTLE_DOCS_PATH) and fs.open(TURTLE_DOCS_PATH, "r")
-      if handle then
-        context = handle.readAll()
-        handle.close()
-      else
-        context = getQuickReference()
-      end
-    else
-      -- Load quick reference (non-turtle machine writing turtle code)
-      context = getQuickReference()
-    end
-
-    -- If user provided a prompt, combine context with their question
-    if userPrompt ~= "" then
-      return "I need help with ComputerCraft turtle programming.\n\n" ..
-             context .. "\n\n" ..
-             "My question: " .. userPrompt
-    else
-      -- No prompt provided, just show the context
-      return nil, "Turtle API context loaded. You can now ask turtle programming questions.\n\n" ..
-                  (loadFull and "Full documentation loaded." or "Quick reference loaded.") ..
-                  "\n\nExample: /turtle write a script to mine a 3x3 tunnel"
-    end
-  end,
-
-  -- Only inject turtle context when this machine actually is a turtle
-  systemPrompt = turtle and [[
+-- How turtles work, for the system prompt on a turtle
+local TURTLE_GUIDE = [[
 ## Turtle Programming
 This machine is a ComputerCraft turtle: the `turtle` API is a global (no require). How turtles interact with the world:
 
@@ -143,6 +95,70 @@ Writing build scripts (shapes, patterns, fractals):
 3. Check fuel up front, report progress with print() so the user can watch, and stop with a clear error() message on unrecoverable failure.
 
 Full API reference: /turtle full, or read_file ]] .. TURTLE_DOCS_PATH .. [[.
+]]
 
-]] .. getQuickReference() or nil,
+return skills.create({
+  name = "turtle",
+  description = "Add the turtle API reference to the conversation",
+  commands = { "/turtle" },
+
+  -- /turtle [question]       the quick reference
+  -- /turtle full [question]  the full reference (docs/turtle.md)
+  -- The reference goes into the system prompt for the rest of the
+  -- conversation (/clear removes it); a question is then sent as typed.
+  onActivate = function(agent, args)
+    args = args or ""
+    local loadFull = false
+    local userPrompt = args:match("^%s*(.-)%s*$")
+    local rest = userPrompt:match("^full%s+(.+)$")
+    if rest then
+      loadFull, userPrompt = true, rest
+    elseif userPrompt == "full" then
+      loadFull, userPrompt = true, ""
+    end
+
+    local context = agent.state.context
+    local before = context.turtle
+    if loadFull then
+      context.turtle = "full"
+    elseif before ~= "full" and not turtle then
+      -- On a turtle the quick reference is always in the system prompt
+      context.turtle = "quick"
+    end
+
+    if userPrompt ~= "" then
+      return userPrompt
+    end
+    if context.turtle == before or (not loadFull and turtle) then
+      return nil, (context.turtle == "full" and "The full turtle API reference"
+        or "The turtle API quick reference") .. " is already in the context.\n" ..
+        (context.turtle ~= "full" and "Use /turtle full for the complete docs; " or "") ..
+        "ask turtle questions directly."
+    end
+    local what = context.turtle == "full"
+      and (readDocs() and "The full turtle API reference" or "The turtle API quick reference (docs/turtle.md is missing)")
+      or "The turtle API quick reference"
+    return nil, what .. " is now in the context for this conversation (/clear removes it).\n" ..
+      "Example: write a script to mine a 3x3 tunnel"
+  end,
+
+  -- On a turtle: how turtles work and the quick reference, always. After
+  -- /turtle: the quick reference, or after /turtle full: the full docs.
+  systemPrompt = function(agent)
+    local mode = agent and agent.state and agent.state.context and agent.state.context.turtle
+    local parts = {}
+    if turtle then
+      parts[#parts + 1] = TURTLE_GUIDE
+    end
+    local docs = mode == "full" and readDocs()
+    if docs then
+      parts[#parts + 1] = "Full turtle API reference (" .. TURTLE_DOCS_PATH .. "):\n" .. docs
+    elseif turtle or mode then
+      parts[#parts + 1] = getQuickReference()
+    end
+    if #parts == 0 then
+      return nil
+    end
+    return table.concat(parts, "\n")
+  end,
 })
