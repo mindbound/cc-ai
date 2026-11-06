@@ -20,27 +20,67 @@ return function(T)
   -- to it and the files exist only under the commit (as when the branch
   -- URLs on raw.githubusercontent.com still serve a cached older version).
   -- Each file's listed size is its length; noSize lists files without one.
-  local function setRoutes(files, commit, noSize)
+  -- (repo and branch: me/repo and dev unless given)
+  local function setRoutes(files, commit, noSize, repo, branch)
     mock.reset()
-    local ref = commit or "dev"
+    repo, branch = repo or "me/repo", branch or "dev"
+    local ref = commit or branch
     local paths = { { "lib", "tree" }, { "README.md", "blob" }, { ".gitattributes", "blob" } }
     for path, body in pairs(files) do
       local size = not (noSize and noSize[path]) and select(2, body:find("$")) or nil
       table.insert(paths, { path, "blob", size })
-      mock.routes["https://raw.githubusercontent.com/me/repo/" .. ref .. "/" .. path] = body
+      mock.routes["https://raw.githubusercontent.com/" .. repo .. "/" .. ref .. "/" .. path] = body
     end
-    mock.routes["https://raw.githubusercontent.com/me/repo/" .. ref .. "/README.md"] = "readme"
-    mock.routes["https://api.github.com/repos/me/repo/git/trees/" .. ref .. "?recursive=1"] = treeJson(paths)
+    mock.routes["https://raw.githubusercontent.com/" .. repo .. "/" .. ref .. "/README.md"] = "readme"
+    mock.routes["https://api.github.com/repos/" .. repo .. "/git/trees/" .. ref .. "?recursive=1"] = treeJson(paths)
     if commit then
-      mock.routes["https://api.github.com/repos/me/repo/commits/dev"] = commit .. "\n"
+      mock.routes["https://api.github.com/repos/" .. repo .. "/commits/" .. branch] = commit .. "\n"
     end
   end
 
   local COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
-  -- Run the installer in this environment so it sees the fake http
+  -- These tests run the installer in this environment, so it sees the fake
+  -- http, but with no hard drives attached (in-game, a real one would
+  -- change what it says), its startup file in T.tmp and a shell path of its
+  -- own: the real startup file and shell path are never touched, in-game
+  -- either. (The tests of where it installs use fakeComputer, below.)
+  local sandboxStartup = T.tmp .. "/sandbox"
+  local function sandboxed(path)
+    if type(path) ~= "string" then return path end
+    local p = fs.combine(path, "")
+    if p == "startup" or p:sub(1, 8) == "startup/" then
+      return sandboxStartup .. "/" .. p
+    end
+    return path
+  end
+  -- (looked up in fs at each call, so withReplaced(fs, ...) still works)
+  local sandboxFs = setmetatable({}, { __index = function(_, key)
+    if key == "combine" or key == "getDir" or key == "getName" or type(fs[key]) ~= "function" then
+      return fs[key]
+    end
+    return function(a, b, ...)
+      if key == "move" or key == "copy" then
+        b = sandboxed(b)
+      end
+      return fs[key](sandboxed(a), b, ...)
+    end
+  end })
+  local sandboxPath = "/rom/programs"
+  local sandboxEnv
+  local sandboxShell = setmetatable({
+    path = function() return sandboxPath end,
+    setPath = function(path) sandboxPath = path end,
+    setCompletionFunction = function() end,
+    run = function(program)
+      assert(load(T.readFile(sandboxed(program)), "@/" .. fs.combine(program, ""), "t", sandboxEnv))()
+      return true
+    end,
+  }, { __index = shell })
+  sandboxEnv = setmetatable({ peripheral = { find = function() end }, fs = sandboxFs, shell = sandboxShell },
+    { __index = _ENV })
   local function runInstaller(...)
-    local fn = assert(loadfile(root .. "/install.lua", "t", _ENV))
+    local fn = assert(loadfile(root .. "/install.lua", "t", sandboxEnv))
     fn(...)
   end
 
@@ -78,9 +118,9 @@ return function(T)
     if not ok then error(err, 0) end
   end
 
-  local savedStartup = T.readFile(STARTUP)
-  local savedPath = shell.path()
   local dir = T.tmp .. "/inst"
+  -- (the real ones, which the tests below must leave as they are)
+  local realStartup, realPath = T.readFile(STARTUP), shell.path()
 
   T.test("installer downloads the managed directories and adds a startup file", function()
     T.resetTmp()
@@ -102,9 +142,9 @@ return function(T)
         T.eq(req.binary, true, "raw files are fetched in binary mode")
       end
     end
-    local startup = T.readFile(STARTUP)
-    T.contains(startup, "local binDir = \"" .. dir .. "/bin\"")
-    T.contains(":" .. shell.path() .. ":", ":" .. dir .. "/bin:")
+    local startup = T.readFile(sandboxed(STARTUP))
+    T.contains(startup, "\nlocal dir = \"" .. dir .. "\"\n")
+    T.contains(":" .. sandboxPath .. ":", ":" .. dir .. "/bin:")
   end)
 
   T.test("reinstalling replaces old files and doesn't duplicate the path", function()
@@ -114,7 +154,7 @@ return function(T)
     T.ok(not fs.exists(dir .. "/lib/stale.lua"), "stale file removed")
     T.ok(not fs.exists(dir .. "/bin"), "directories missing upstream are removed")
     T.eq(T.readFile(dir .. "/lib/ai/init.lua"), "return { v = 2 }")
-    local _, count = (":" .. shell.path() .. ":"):gsub(":" .. dir:gsub("%-", "%%-") .. "/bin:", "")
+    local _, count = (":" .. sandboxPath .. ":"):gsub(":" .. dir:gsub("%-", "%%-") .. "/bin:", "")
     T.eq(count, 1)
   end)
 
@@ -357,7 +397,7 @@ return function(T)
     T.eq(T.readFile(dir .. "/lib/ai/init.lua"), "return {}")
     setRoutes(setFiles, COMMIT)
     T.raises(function() runInstaller("--fulll", "me/repo", "dev", dir) end,
-      "Unknown option --fulll (use --full or --minimal)")
+      "Unknown option --fulll (use --full, --minimal or --dir <folder>)")
     T.eq(#mock.requests, 0, "nothing requested")
   end)
 
@@ -619,17 +659,706 @@ return function(T)
   end)
 
   T.test("installer fails clearly when the repository can't be listed", function()
+    T.resetTmp()
     mock.reset()
     T.raises(function() install(dir) end, "Download failed")
   end)
 
-  -- Restore the real startup file and shell path
-  if savedStartup then
-    T.writeFile(STARTUP, savedStartup)
-  elseif fs.exists(STARTUP) then
-    fs.delete(STARTUP)
+  -- A computer inside a folder of this one, for the tests of where the
+  -- installer installs: it has its own /cc-ai, /startup, drives and shell
+  -- path, so the real ones are never touched. opts.drives: { [name] =
+  -- { capacity = bytes, label = its fs.getDrive name, hard = true for a
+  -- hard drive (CC-Harddisks), readOnly = true } }; the top-level folders
+  -- with those names stand for the drives. opts.capacity: the computer's
+  -- own drive. Free space is the capacity less what is stored, counted as
+  -- CC: Tweaked does (each file at least 500 bytes, each folder 500).
+  local function fakeComputer(opts)
+    local base = T.tmp .. "/computer"
+    fs.makeDir(base)
+    local drives = opts.drives or {}
+    for name in pairs(drives) do
+      fs.makeDir(base .. "/" .. name)
+    end
+    local c = { capacity = opts.capacity or 1000000, shellPath = "/rom/programs", completions = {} }
+
+    -- The real path of a path on this computer
+    function c.real(path)
+      local p = fs.combine(path, "")
+      return p == "" and base or (base .. "/" .. p)
+    end
+
+    -- The drive a path is on (a name in drives), or nil for the computer's own
+    local function driveOf(path)
+      local first = fs.combine(path, ""):match("^[^/]+")
+      return first and drives[first] and first or nil
+    end
+
+    local function stored(realPath)
+      if not fs.exists(realPath) then return 0 end
+      if not fs.isDir(realPath) then return math.max(fs.getSize(realPath), 500) end
+      local total = 500
+      for _, name in ipairs(fs.list(realPath)) do
+        total = total + stored(realPath .. "/" .. name)
+      end
+      return total
+    end
+
+    local cfs = setmetatable({}, { __index = fs })
+    for _, name in ipairs({ "exists", "isDir", "list", "makeDir", "delete", "getSize", "open" }) do
+      cfs[name] = function(path, ...) return fs[name](c.real(path), ...) end
+    end
+    cfs.move = function(from, to) return fs.move(c.real(from), c.real(to)) end
+    cfs.copy = function(from, to) return fs.copy(c.real(from), c.real(to)) end
+    cfs.isReadOnly = function(path)
+      local drive = driveOf(path)
+      return drive ~= nil and drives[drive].readOnly == true
+    end
+    cfs.getDrive = function(path)
+      if not cfs.exists(path) then return nil end
+      local drive = driveOf(path)
+      return drive and (drives[drive].label or drive) or "hdd"
+    end
+    cfs.getFreeSpace = function(path)
+      local drive = driveOf(path)
+      local used, capacity = 0, c.capacity
+      if drive then
+        used, capacity = stored(c.real(drive)) - 500, drives[drive].capacity or 0
+      else
+        for _, name in ipairs(fs.list(base)) do
+          if not drives[name] then
+            used = used + stored(base .. "/" .. name)
+          end
+        end
+      end
+      return math.max(capacity - used, 0)
+    end
+    c.fs = cfs
+
+    local cperipheral = {
+      find = function(kind)
+        local found = {}
+        if kind == "hard_drive" then
+          local names = {}
+          for name, drive in pairs(drives) do
+            if drive.hard then table.insert(names, name) end
+          end
+          table.sort(names)
+          for _, name in ipairs(names) do
+            table.insert(found, { getFixedMountPath = function() return name end })
+          end
+        end
+        return table.unpack(found)
+      end,
+    }
+
+    local env
+    c.cwd = ""
+    c.shell = {
+      path = function() return c.shellPath end,
+      setPath = function(path) c.shellPath = path end,
+      -- (as CraftOS's shell.resolve: relative to the current folder)
+      resolve = function(path)
+        local start = path:sub(1, 1)
+        if start == "/" or start == "\\" then
+          return fs.combine("", path)
+        end
+        return fs.combine(c.cwd, path)
+      end,
+      setCompletionFunction = function(program, fn) c.completions[program] = fn end,
+      run = function(program)
+        local text = T.readFile(c.real(program))
+        assert(load(text, "@/" .. fs.combine(program, ""), "t", env))()
+        return true
+      end,
+    }
+    env = setmetatable({ fs = cfs, shell = c.shell, peripheral = cperipheral }, { __index = _ENV })
+
+    -- Run the installer as the file at path on this computer (the installer
+    -- of an install there), or as `wget run` does (path nil). Returns what
+    -- it printed; raises what it raised.
+    function c.run(path, ...)
+      local fn = assert(load(T.readFile(root .. "/install.lua"), path and ("@" .. path) or "install.lua", "t", env))
+      local rec = capture.createTerminal(400, 100)
+      local old = term.redirect(rec)
+      local ok, err = pcall(fn, ...)
+      term.redirect(old)
+      if not ok then error(err, 0) end
+      return rec.getText()
+    end
+
+    -- Take a drive away (its folder and contents stay aside) and attach it again
+    local away = {}
+    function c.unmount(name)
+      away[name] = drives[name]
+      drives[name] = nil
+      fs.move(base .. "/" .. name, T.tmp .. "/away-" .. name)
+    end
+    function c.mount(name)
+      drives[name] = away[name]
+      fs.move(T.tmp .. "/away-" .. name, base .. "/" .. name)
+    end
+    -- A drive mounted under another name (after a reboot without the drive
+    -- that had the name)
+    function c.rename(from, to)
+      drives[to], drives[from] = drives[from], nil
+      fs.move(base .. "/" .. from, base .. "/" .. to)
+    end
+
+    function c.read(path) return T.readFile(c.real(path)) end
+    function c.write(path, content) T.writeFile(c.real(path), content) end
+    function c.onPath(binDir) return (":" .. c.shellPath .. ":"):find(":" .. binDir .. ":", 1, true) ~= nil end
+    return c
   end
-  shell.setPath(savedPath)
+
+  T.test("a new install goes to the hard drive with the most free space, if the files fit", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = {
+      hdd = { hard = true, capacity = 50000, label = "right" },
+      hdd2 = { hard = true, capacity = 80000, label = "back" },
+      disk = { capacity = 900000, label = "left" },  -- a disk or a cartridge: never chosen
+    } })
+    setRoutes(setFiles, COMMIT)
+    local out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (minimal) from me/repo (dev)\n")
+    T.contains(out, "Installing to /hdd2/cc-ai (a hard drive with 80 KB free).\n")
+    T.eq(c.read("/hdd2/cc-ai/lib/ai/init.lua"), "return {}")
+    T.ok(not c.fs.exists("/cc-ai"), "nothing on the computer's own drive")
+    T.contains(c.read("/startup/cc-ai.lua"), "\nlocal dir = \"/hdd2/cc-ai\"\n")
+    T.ok(c.onPath("/hdd2/cc-ai/bin"), c.shellPath)
+    T.ok(c.completions["hdd2/cc-ai/bin/cc-code.lua"], "completion for cc-code")
+    T.contains(out, "Update later with: /hdd2/cc-ai/install me/repo dev /hdd2/cc-ai\n")
+
+    -- No hard drive with room for the files (2500 bytes): /cc-ai
+    T.resetTmp()
+    c = fakeComputer({ drives = { hdd = { hard = true, capacity = 2499, label = "right" } } })
+    setRoutes(setFiles, COMMIT)
+    out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing to /cc-ai.\n")
+    T.eq(c.read("/cc-ai/lib/ai/init.lua"), "return {}")
+    T.contains(out, "Update later with: /cc-ai/install me/repo dev\n")
+    -- (it fits exactly)
+    T.resetTmp()
+    c = fakeComputer({ drives = { hdd = { hard = true, capacity = 2500, label = "right" } } })
+    setRoutes(setFiles, COMMIT)
+    out = c.run(nil, "me/repo", "dev")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return {}")
+  end)
+
+  T.test("an update goes to the install that exists, and the startup file follows it", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    setRoutes(setFiles, COMMIT)
+    c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    setRoutes(setFiles, COMMIT)
+    c.run(nil, "me/repo", "dev", "/hdd/cc-ai", "--full")
+    T.contains(c.read("/startup/cc-ai.lua"), "\nlocal dir = \"/hdd/cc-ai\"\n")
+
+    -- The installer of an install updates its own, whatever the startup
+    -- file names; the startup file then names it. The other install is
+    -- reported, with the user's files in its skills folder.
+    c.write("/hdd/cc-ai/lib/cc-code/skills/mine.lua", "-- my skill")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 2 }" }, COMMIT)
+    local out = c.run("/cc-ai/install.lua", "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (minimal) from me/repo (dev) to /cc-ai\n")
+    T.eq(c.read("/cc-ai/lib/ai/init.lua"), "return { v = 2 }")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return {}", "the other install untouched")
+    T.contains(c.read("/startup/cc-ai.lua"), "\nlocal dir = \"/cc-ai\"\n")
+    T.ok(c.onPath("/cc-ai/bin"), c.shellPath)
+    T.ok(not c.onPath("/hdd/cc-ai/bin"), "the other install's bin folder is off the path: " .. c.shellPath)
+    T.contains(out, "The startup file now names /cc-ai instead of /hdd/cc-ai. The install in /hdd/cc-ai" ..
+      " is no longer used here. If no other computer uses it, delete it with rm /hdd/cc-ai\n")
+    T.contains(out, "Before you delete it, move your files in /hdd/cc-ai/lib/cc-code/skills to /.cc-code/skills:" ..
+      " mine.lua\n")
+
+    -- Run as `wget run` does: the install the startup file names
+    c.run("/hdd/cc-ai/install.lua", "me/repo", "dev")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 3 }", ["tests/run.lua"] = "-- tests" }, COMMIT)
+    out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (full) from me/repo (dev) to /hdd/cc-ai\n")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return { v = 3 }")
+    T.eq(c.read("/cc-ai/lib/ai/init.lua"), "return { v = 2 }")
+
+    -- Without a startup file: /cc-ai, before cc-ai on a hard drive
+    c.fs.delete("/startup")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 4 }" }, COMMIT)
+    c.run(nil, "me/repo", "dev")
+    T.eq(c.read("/cc-ai/lib/ai/init.lua"), "return { v = 4 }")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return { v = 3 }")
+
+    -- ... and cc-ai on a hard drive, as it was (full) and with no new folder
+    c.fs.delete("/startup")
+    c.fs.delete("/cc-ai")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 5 }", ["tests/run.lua"] = "-- tests" }, COMMIT)
+    out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (full) from me/repo (dev) to /hdd/cc-ai\n")
+    T.ok(not out:find("Installing to", 1, true), out)
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return { v = 5 }")
+    T.ok(not c.fs.exists("/cc-ai"), "no new install in /cc-ai")
+
+    -- A startup file from an older installer names the bin folder (of an
+    -- install in a folder of its own, which only the startup file names)
+    setRoutes(setFiles, COMMIT)
+    c.run(nil, "--dir", "/apps/cc-ai", "me/repo", "dev")
+    c.write("/startup/cc-ai.lua", "-- Added by the cc-ai installer\nlocal binDir = \"/apps/cc-ai/bin\"\n")
+    c.shellPath = "/rom/programs:/apps/cc-ai/bin"
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 6 }" }, COMMIT)
+    out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (minimal) from me/repo (dev) to /apps/cc-ai\n")
+    T.eq(c.read("/apps/cc-ai/lib/ai/init.lua"), "return { v = 6 }")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return { v = 5 }")
+    T.ok(not out:find("no longer used", 1, true), out)
+    -- ... and one that names another install: its bin folder goes off the path
+    c.write("/startup/cc-ai.lua", "-- Added by the cc-ai installer\nlocal binDir = \"/hdd/cc-ai/bin\"\n")
+    c.shellPath = "/rom/programs:/hdd/cc-ai/bin"
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 7 }" }, COMMIT)
+    out = c.run("/apps/cc-ai/install.lua", "me/repo", "dev")
+    T.eq(c.shellPath, "/rom/programs:/apps/cc-ai/bin")
+    T.contains(out, "The install in /hdd/cc-ai is no longer used here.")
+  end)
+
+  T.test("an install of an older installer (no .version) is updated where it is", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    c.write("/cc-ai/bin/cc-code.lua", "print('old')")
+    c.write("/cc-ai/lib/ai/init.lua", "return 'old'")
+    c.write("/cc-ai/install.lua", "-- older installer")
+    c.write("/startup/cc-ai.lua", "-- Added by the cc-ai installer\nlocal binDir = \"/cc-ai/bin\"\n")
+    setRoutes(setFiles, COMMIT)
+    local out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (minimal) from me/repo (dev) to /cc-ai\n")
+    T.eq(c.read("/cc-ai/lib/ai/init.lua"), "return {}")
+    T.ok(not c.fs.exists("/hdd/cc-ai"), "no second install on the hard drive")
+    -- Its own installer (the second run of /cc-ai/install) too, without a startup file
+    c.fs.delete("/startup")
+    c.fs.delete("/cc-ai/.version")
+    c.write("/cc-ai/bin/cc-code.lua", "print('old')")
+    setRoutes(setFiles, COMMIT)
+    out = c.run("/cc-ai/install.lua", "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (minimal) from me/repo (dev) to /cc-ai\n")
+    T.ok(not c.fs.exists("/hdd/cc-ai"), "no second install on the hard drive")
+
+    -- An installer downloaded into a folder of its own installs as wget run does
+    c.write("/downloads/install.lua", "-- the installer")
+    c.fs.delete("/cc-ai")
+    c.fs.delete("/startup")
+    setRoutes(setFiles, COMMIT)
+    out = c.run("/downloads/install.lua", "me/repo", "dev")
+    T.contains(out, "Installing to /hdd/cc-ai (a hard drive with 900 KB free).\n")
+    T.ok(not c.fs.exists("/downloads/lib"), "not into the installer's folder")
+  end)
+
+  T.test("an install moved to a disk is found and updated there, as the startup file finds it", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = {
+      hdd = { hard = true, capacity = 900000, label = "right" },
+      disk = { capacity = 900000, label = "left" },
+    } })
+    setRoutes({ ["lib/ai/init.lua"] = "return {}", ["bin/cc-code.lua"] = "print('hi')" }, COMMIT)
+    c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    c.fs.move("/cc-ai", "/disk/cc-ai")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 2 }", ["bin/cc-code.lua"] = "print('hi')" }, COMMIT)
+    local out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing cc-ai (minimal) from me/repo (dev) to /disk/cc-ai\n")
+    T.eq(c.read("/disk/cc-ai/lib/ai/init.lua"), "return { v = 2 }")
+    T.ok(not c.fs.exists("/hdd/cc-ai"), "no second install on the hard drive")
+    T.ok(not c.onPath("/cc-ai/bin"), c.shellPath)
+    T.ok(c.onPath("/disk/cc-ai/bin"), c.shellPath)
+    T.ok(not out:find("no longer used", 1, true), out)
+  end)
+
+  T.test("moving cc-ai with mv, then running its installer, moves the startup file along", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    setRoutes(setFiles, COMMIT)
+    local first = c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    T.ok(not first:find("next update", 1, true), "no hint while the disk has room: " .. first)
+    c.write("/cc-ai/vendor/basalt.lua", "-- bundle")
+    T.ok(c.onPath("/cc-ai/bin"))
+    c.fs.move("/cc-ai", "/hdd/cc-ai")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 2 }" }, COMMIT)
+    local out = c.run("/hdd/cc-ai/install.lua", "me/repo", "dev")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return { v = 2 }")
+    T.eq(c.read("/hdd/cc-ai/vendor/basalt.lua"), "-- bundle", "the Basalt UI's download moved along")
+    T.ok(not c.fs.exists("/cc-ai"), "nothing new in /cc-ai")
+    T.contains(c.read("/startup/cc-ai.lua"), "\nlocal dir = \"/hdd/cc-ai\"\n")
+    T.ok(c.onPath("/hdd/cc-ai/bin"), c.shellPath)
+    T.ok(not c.onPath("/cc-ai/bin"), c.shellPath)
+    T.ok(not out:find("no longer used", 1, true), "the old folder is gone: " .. out)
+    T.contains(out, "Update later with: /hdd/cc-ai/install me/repo dev /hdd/cc-ai\n")
+  end)
+
+  T.test("the startup file finds the install on another drive, or under the drive's new name", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = {
+      hdd = { hard = true, capacity = 900000, label = "right" },
+      hdd2 = { hard = true, capacity = 900000, label = "back" },
+      disk = { capacity = 900000, label = "left" },
+    } })
+    setRoutes({ ["lib/ai/init.lua"] = "return {}", ["bin/cc-code.lua"] = "print('hi')" }, COMMIT)
+    c.run(nil, "--dir", "/hdd", "me/repo", "dev")
+    T.contains(c.read("/startup/cc-ai.lua"), "\nlocal dir = \"/hdd/cc-ai\"\n")
+    local function boot()
+      c.shellPath = "/rom/programs"
+      c.completions = {}
+      c.shell.run("/startup/cc-ai.lua")
+    end
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/hdd/cc-ai/bin")
+
+    -- After a reboot the drive is /hdd2 (another hard drive took /hdd)
+    c.fs.move("/hdd/cc-ai", "/hdd2/cc-ai")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/hdd2/cc-ai/bin")
+    T.ok(c.completions["hdd2/cc-ai/bin/cc-code.lua"], "completion for cc-code")
+    -- Moved to the computer's own drive
+    c.fs.move("/hdd2/cc-ai", "/cc-ai")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/cc-ai/bin")
+    -- A copy on the computer's own drive and one on a drive: the one on a
+    -- drive, as the install was on a drive
+    c.fs.copy("/cc-ai", "/hdd2/cc-ai")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/hdd2/cc-ai/bin")
+    -- The installer updates the install where the startup file finds it
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 2 }", ["bin/cc-code.lua"] = "print('hi')" }, COMMIT)
+    local out = c.run(nil, "me/repo", "dev")
+    T.contains(out, " to /hdd2/cc-ai\n")
+    T.eq(c.read("/hdd2/cc-ai/lib/ai/init.lua"), "return { v = 2 }")
+    T.eq(c.read("/cc-ai/lib/ai/init.lua"), "return {}", "the copy on the computer's own drive untouched")
+    T.contains(c.read("/startup/cc-ai.lua"), "\nlocal dir = \"/hdd2/cc-ai\"\n")
+
+    -- The folder it names, also when a copy comes first in the search
+    c.fs.copy("/cc-ai", "/hdd/cc-ai")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/hdd2/cc-ai/bin")
+    -- Not there: hard drives first, then other drives (a cartridge), then
+    -- the computer's own folders; a cc-ai folder without bin/cc-code.lua
+    -- is not an install
+    c.fs.move("/hdd2/cc-ai", "/hdd2/old")
+    c.fs.copy("/cc-ai", "/disk/cc-ai")
+    c.fs.copy("/cc-ai", "/backup/cc-ai")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/hdd/cc-ai/bin")
+    c.fs.delete("/hdd/cc-ai/bin")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/disk/cc-ai/bin")
+    c.fs.delete("/disk/cc-ai")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/backup/cc-ai/bin")
+    c.fs.move("/hdd2/old", "/hdd2/cc-ai")
+
+    -- Its drive not mounted (not attached yet, or its wired modem off): the
+    -- folder it names, whatever else there is; the installer stops, so it
+    -- does not make a second install
+    c.unmount("hdd2")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/hdd2/cc-ai/bin")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 3 }", ["bin/cc-code.lua"] = "print('hi')" }, COMMIT)
+    local err = T.raises(function() c.run(nil, "me/repo", "dev") end)
+    T.eq(err, "The startup file names /hdd2/cc-ai, but no drive is mounted at /hdd2. Attach it (or turn on its" ..
+      " wired modem) and run the installer again, or choose a folder with --dir.")
+    T.eq(#mock.requests, 0, "nothing requested")
+    c.mount("hdd2")
+    boot()
+    T.eq(c.shellPath, "/rom/programs:/hdd2/cc-ai/bin")
+    T.eq(c.read("/hdd2/cc-ai/lib/ai/init.lua"), "return { v = 2 }")
+
+    -- An older startup file names the bin folder on a drive name that is
+    -- not mounted: looked for on the drives only (not in /cc-ai)
+    c.write("/startup/cc-ai.lua", "-- Added by the cc-ai installer\nlocal binDir = \"/hdd3/cc-ai/bin\"\n")
+    setRoutes({ ["lib/ai/init.lua"] = "return { v = 3 }", ["bin/cc-code.lua"] = "print('hi')" }, COMMIT)
+    out = c.run(nil, "me/repo", "dev")
+    T.contains(out, " to /hdd2/cc-ai\n")
+    T.eq(c.read("/cc-ai/lib/ai/init.lua"), "return {}")
+  end)
+
+  T.test("a hard drive mounted under another name after a reboot is still found", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = {
+      hdd = { hard = true, capacity = 50000, label = "right" },
+      hdd2 = { hard = true, capacity = 900000, label = "back" },
+    } })
+    local files = { ["lib/ai/init.lua"] = "return {}", ["bin/cc-code.lua"] = "print('hi')" }
+    setRoutes(files, COMMIT)
+    T.contains(c.run(nil, "me/repo", "dev"), "Installing to /hdd2/cc-ai (a hard drive with 900 KB free).\n")
+    c.write("/cc-ai/bin/cc-code.lua", "-- an old copy on the computer's own drive")
+    -- The small drive is gone: the big one is /hdd at the next boot
+    c.unmount("hdd")
+    c.rename("hdd2", "hdd")
+    c.shellPath = "/rom/programs"
+    c.shell.run("/startup/cc-ai.lua")
+    T.eq(c.shellPath, "/rom/programs:/hdd/cc-ai/bin")
+    setRoutes(files, COMMIT)
+    local out = c.run(nil, "me/repo", "dev")
+    T.contains(out, " to /hdd/cc-ai\n")
+    T.contains(c.read("/startup/cc-ai.lua"), "\nlocal dir = \"/hdd/cc-ai\"\n")
+  end)
+
+  T.test("the installer updates the install the startup file puts on the path, in every case", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = {
+      hdd = { hard = true, capacity = 900000, label = "right" },
+      hdd2 = { hard = true, capacity = 900000, label = "back" },
+      disk = { capacity = 900000, label = "left" },
+    } })
+    local files = { ["lib/ai/init.lua"] = "return {}", ["bin/cc-code.lua"] = "print('hi')" }
+    -- The folder (from the startup file, then the installer) on the path
+    local function check(expected)
+      c.shellPath = "/rom/programs"
+      c.shell.run("/startup/cc-ai.lua")
+      T.eq(c.shellPath, "/rom/programs:" .. expected .. "/bin")
+      setRoutes(files, COMMIT)
+      T.contains(c.run(nil, "me/repo", "dev"), " to " .. expected .. "\n")
+    end
+    setRoutes(files, COMMIT)
+    c.run(nil, "--dir", "/hdd2", "me/repo", "dev")
+    -- The folder it names, before a copy that comes first in the search
+    c.fs.copy("/hdd2/cc-ai", "/hdd/cc-ai")
+    check("/hdd2/cc-ai")
+    -- Not there: a hard drive, before a cartridge, before this computer's folders
+    c.fs.move("/hdd2/cc-ai", "/hdd2/old")
+    c.fs.copy("/hdd/cc-ai", "/disk/cc-ai")
+    c.fs.copy("/hdd/cc-ai", "/backup/cc-ai")
+    check("/hdd/cc-ai")
+    c.fs.delete("/hdd/cc-ai")
+    check("/disk/cc-ai")
+
+    -- A folder of its own on a drive, moved to the computer's own drive
+    T.resetTmp()
+    c = fakeComputer({ drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    setRoutes(files, COMMIT)
+    c.run(nil, "--dir", "/hdd/apps/cc-ai", "me/repo", "dev")
+    c.fs.move("/hdd/apps/cc-ai", "/apps/cc-ai")
+    check("/apps/cc-ai")
+    T.ok(not c.fs.exists("/hdd/cc-ai"), "no second install on the hard drive")
+  end)
+
+  T.test("taking another install off the path, and the user's files in its skills folder", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = {
+      hdd = { hard = true, capacity = 900000, label = "right" },
+      hdd2 = { hard = true, capacity = 900000, label = "back" },
+    } })
+    -- The startup file names /hdd/cc-ai and finds it in /hdd2/cc-ai: both
+    -- bin folders go off the path
+    setRoutes({ ["bin/cc-code.lua"] = "print()", ["lib/cc-code/skills/help.lua"] = "-- help",
+      ["lib/cc-code/skills/oldskill.lua"] = "-- old" }, COMMIT)
+    c.run(nil, "--dir", "/hdd", "me/repo", "dev")
+    c.write("/hdd/cc-ai/lib/cc-code/skills/mine.lua", "-- mine")
+    c.fs.move("/hdd/cc-ai", "/hdd2/cc-ai")
+    c.shellPath = "/rom/programs"
+    c.shell.run("/startup/cc-ai.lua")
+    T.eq(c.shellPath, "/rom/programs:/hdd2/cc-ai/bin")
+    setRoutes({ ["bin/cc-code.lua"] = "print()", ["lib/cc-code/skills/help.lua"] = "-- help" }, COMMIT)
+    local out = c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    T.eq(c.shellPath, "/rom/programs:/cc-ai/bin")
+    T.contains(out, "The startup file now names /cc-ai instead of /hdd2/cc-ai. The install in /hdd2/cc-ai is no" ..
+      " longer used here.")
+    -- (oldskill.lua was cc-ai's, as its .version says)
+    T.contains(out, "move your files in /hdd2/cc-ai/lib/cc-code/skills to /.cc-code/skills: mine.lua\n")
+
+    -- An install without .version: what cc-ai does not have is the user's
+    T.resetTmp()
+    c = fakeComputer({ drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    c.write("/hdd/cc-ai/bin/cc-code.lua", "print('old')")
+    c.write("/hdd/cc-ai/lib/cc-code/skills/help.lua", "-- old help")
+    c.write("/hdd/cc-ai/lib/cc-code/skills/mine.lua", "-- mine")
+    c.write("/startup/cc-ai.lua", "-- Added by the cc-ai installer\nlocal binDir = \"/hdd/cc-ai/bin\"\n")
+    setRoutes({ ["bin/cc-code.lua"] = "print()", ["lib/cc-code/skills/help.lua"] = "-- help" }, COMMIT)
+    out = c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    T.contains(out, "move your files in /hdd/cc-ai/lib/cc-code/skills to /.cc-code/skills: mine.lua\n")
+  end)
+
+  T.test("a new install never takes a folder with someone else's files", function()
+    T.resetTmp()
+    -- /cc-ai with the user's lib/: the install stops, nothing is deleted
+    local c = fakeComputer({})
+    c.write("/cc-ai/lib/mylib.lua", "-- mine")
+    setRoutes(setFiles, COMMIT)
+    local err = T.raises(function() c.run(nil, "me/repo", "dev") end)
+    T.eq(err, "/cc-ai holds files that are not cc-ai's (lib), which the install would replace. Choose a new or" ..
+      " empty folder, such as /cc-ai/cc-ai.")
+    T.eq(c.read("/cc-ai/lib/mylib.lua"), "-- mine")
+    -- Every folder an update replaces counts
+    for _, name in ipairs({ "docs", "examples", "tests" }) do
+      c.write("/cc-ai/" .. name .. "/x.lua", "-- mine")
+    end
+    c.write("/cc-ai/bin/tool.lua", "-- mine")
+    setRoutes(setFiles, COMMIT)
+    err = T.raises(function() c.run(nil, "me/repo", "dev") end)
+    T.contains(err, "(bin, docs, examples, lib, tests)")
+    T.eq(c.read("/cc-ai/tests/x.lua"), "-- mine")
+
+    -- A hard drive's cc-ai folder that is not an install is passed over
+    T.resetTmp()
+    c = fakeComputer({ drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    c.write("/hdd/cc-ai/notes.txt", "my notes")
+    setRoutes(setFiles, COMMIT)
+    local out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing to /cc-ai.\n")
+    T.ok(not c.fs.exists("/hdd/cc-ai/lib"), "nothing next to the notes")
+    -- A leftover /cc-ai (only the Basalt UI's download) is not an install either
+    T.resetTmp()
+    c = fakeComputer({ drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    c.write("/cc-ai/vendor/basalt.lua", "-- bundle")
+    setRoutes(setFiles, COMMIT)
+    out = c.run(nil, "me/repo", "dev")
+    T.contains(out, "Installing to /hdd/cc-ai (a hard drive with 900 KB free).\n")
+    T.ok(not c.fs.exists("/cc-ai/lib"), "not into the leftover folder")
+  end)
+
+  T.test("the update and move commands for cc-ai's own repository and branch", function()
+    T.resetTmp()
+    local function routes(files, repo, branch)
+      setRoutes(files, COMMIT, nil, repo or "mindbound/cc-ai", branch or "master")
+    end
+    local c = fakeComputer({ capacity = 5000, drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    routes(setFiles)
+    local out = c.run(nil, "--dir", "/cc-ai")
+    T.contains(out, "Update later with: /cc-ai/install\n")
+    -- After the install, its own installer finds the moved folder
+    T.contains(out, "to move cc-ai there, run mv /cc-ai /hdd/cc-ai, then /hdd/cc-ai/install\n")
+    -- Before it, the installer in /cc-ai may be older (it would install
+    -- into /cc-ai) or missing: the one from the web, given the folder
+    routes(setFiles)
+    local err = T.raises(function() c.run(nil) end)
+    T.contains(err, ": mv /cc-ai /hdd/cc-ai, then wget run" ..
+      " https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua --dir /hdd/cc-ai. Nothing")
+    -- ... unless it is the one running, with the set chosen now
+    routes(setFiles)
+    err = T.raises(function() c.run("/cc-ai/install.lua") end)
+    T.contains(err, ": mv /cc-ai /hdd/cc-ai, then /hdd/cc-ai/install. Nothing")
+    routes(setFiles)
+    err = T.raises(function() c.run("/cc-ai/install.lua", "--full") end)
+    T.contains(err, ": mv /cc-ai /hdd/cc-ai, then /hdd/cc-ai/install --full. Nothing")
+
+    -- A fork's master branch, or another branch of cc-ai, is not cc-ai's
+    -- own source: the commands name it
+    for _, source in ipairs({ { "me/repo", "master" }, { "mindbound/cc-ai", "dev" } }) do
+      local repo, branch = source[1], source[2]
+      T.resetTmp()
+      c = fakeComputer({ capacity = 5000, drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+      routes(setFiles, repo, branch)
+      out = c.run(nil, repo, branch, "/cc-ai")
+      T.contains(out, "Update later with: /cc-ai/install " .. repo .. " " .. branch .. "\n")
+      routes(setFiles, repo, branch)
+      err = T.raises(function() c.run(nil, repo, branch) end)
+      T.contains(err, ": mv /cc-ai /hdd/cc-ai, then wget run https://raw.githubusercontent.com/" .. repo .. "/" ..
+        branch .. "/install.lua " .. repo .. " " .. branch .. " --dir /hdd/cc-ai. Nothing")
+    end
+  end)
+
+  T.test("--dir names the folder (a drive's own folder: cc-ai on it); mistakes stop before any request", function()
+    T.resetTmp()
+    local c = fakeComputer({ drives = {
+      hdd = { hard = true, capacity = 900000, label = "right" },
+      rom = { readOnly = true, label = "rom" },
+    } })
+    setRoutes(setFiles, COMMIT)
+    local out = c.run(nil, "me/repo", "dev", "--dir", "/hdd")
+    T.contains(out, "Installing cc-ai (minimal) from me/repo (dev) to /hdd/cc-ai\n")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return {}")
+    setRoutes(setFiles, COMMIT)
+    c.run(nil, "--dir=apps/cc-ai", "me/repo", "dev")
+    T.eq(c.read("/apps/cc-ai/lib/ai/init.lua"), "return {}", "a folder on the computer's own drive")
+    T.contains(c.read("/startup/cc-ai.lua"), "\n  local within, onDrive = \"apps/cc-ai\", false\n")
+    -- Relative to the current folder
+    c.cwd = "hdd"
+    setRoutes(setFiles, COMMIT)
+    out = c.run(nil, "--dir", "tools/cc-ai", "me/repo", "dev")
+    T.contains(out, " to /hdd/tools/cc-ai\n")
+    T.contains(c.read("/startup/cc-ai.lua"), "\n  local within, onDrive = \"tools/cc-ai\", true\n")
+    c.cwd = ""
+    -- A folder that is not a drive's own is used as it is, also when it exists
+    setRoutes(setFiles, COMMIT)
+    c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    setRoutes(setFiles, COMMIT)
+    out = c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    T.contains(out, " to /cc-ai\n")
+    T.ok(not c.fs.exists("/cc-ai/cc-ai"), "not nested")
+    T.ok(not out:find("no longer used", 1, true), out)
+
+    c.write("/mine/bin/tool.lua", "-- the user's")
+    local mistakes = {
+      { { "--dir" }, "--dir needs a folder, for example --dir /hdd/cc-ai" },
+      { { "--dir", "--full" }, "--dir needs a folder, for example --dir /hdd/cc-ai" },
+      { { "--dir=" }, "--dir needs a folder, for example --dir /hdd/cc-ai" },
+      { { "--dir", "/x", "me/repo", "dev", "/y" }, "Give the folder once: with --dir or as the third argument" },
+      { { "--dir", "/" }, "Choose a folder to install into, such as /cc-ai" },
+      { { "--dir", ".." }, "Choose a folder to install into, such as /cc-ai" },
+      { { "me/repo", "dev", "/" }, "Choose a folder to install into, such as /cc-ai" },
+      { { "--dir", "/rom" }, "Cannot install to /rom/cc-ai: it is read-only." },
+      { { "--dir", "/rom/apps/cc-ai" }, "Cannot install to /rom/apps/cc-ai: it is read-only." },
+      { { "--dir", "/hdd2" }, "No drive is mounted at /hdd2. Attach it (or turn on its wired modem) and run the" ..
+        " installer again, or choose another folder." },
+      { { "--dir", "/disk/cc-ai" }, "No drive is mounted at /disk. Attach it (or turn on its wired modem) and run" ..
+        " the installer again, or choose another folder." },
+      { { "--dir", "/mine" }, "/mine holds files that are not cc-ai's (bin), which the install would replace." ..
+        " Choose a new or empty folder, such as /mine/cc-ai." },
+    }
+    for _, mistake in ipairs(mistakes) do
+      setRoutes(setFiles, COMMIT)
+      local err = T.raises(function() c.run(nil, table.unpack(mistake[1])) end)
+      T.eq(err, mistake[2], table.concat(mistake[1], " "))
+      T.eq(#mock.requests, 0, "nothing requested")
+    end
+  end)
+
+  T.test("short of space, the installer points to a hard drive with room", function()
+    T.resetTmp()
+    -- The files take 2500 bytes, the install 3000 (also its folder and
+    -- .version), and the startup file 1500 (its folder and the file)
+    local c = fakeComputer({ capacity = 2499, drives = { hdd = { hard = true, capacity = 900000, label = "right" } } })
+    setRoutes(setFiles, COMMIT)
+    local err = T.raises(function() c.run(nil, "--dir", "/cc-ai", "me/repo", "dev") end)
+    T.eq(err, "Not enough disk space: the minimal install needs 3 KB, but only 2 KB are free." ..
+      " Free some space and run the installer again. Or install it on the hard drive at /hdd (900 KB free):" ..
+      " run the installer with --dir /hdd/cc-ai. Nothing was changed.")
+
+    -- Installed, but the next update won't fit
+    c.capacity = 5000
+    setRoutes(setFiles, COMMIT)
+    local out = c.run(nil, "--dir", "/cc-ai", "me/repo", "dev")
+    T.contains(out, "This disk has 2 KB free, and the next update needs about 3 KB. The hard drive at /hdd" ..
+      " has 900 KB free: to move cc-ai there, run mv /cc-ai /hdd/cc-ai, then /hdd/cc-ai/install me/repo dev" ..
+      " /hdd/cc-ai\n")
+    setRoutes(setFiles, COMMIT)
+    err = T.raises(function() c.run("/cc-ai/install.lua", "me/repo", "dev") end)
+    T.contains(err, " Free some space and run the installer again. Or move cc-ai to the hard drive at /hdd" ..
+      " (900 KB free): mv /cc-ai /hdd/cc-ai, then /hdd/cc-ai/install me/repo dev /hdd/cc-ai. Nothing was changed.")
+    -- Run as `wget run` does, the installer in /cc-ai may be older: it is
+    -- given the folder, and the set chosen now
+    setRoutes(setFiles, COMMIT)
+    err = T.raises(function() c.run(nil, "--full", "me/repo", "dev") end)
+    T.contains(err, ": mv /cc-ai /hdd/cc-ai, then wget run https://raw.githubusercontent.com/me/repo/dev/install.lua" ..
+      " me/repo dev --dir /hdd/cc-ai --full. Nothing")
+
+    -- No hint for a drive without room, or one that has a cc-ai folder
+    c.fs.makeDir("/hdd/cc-ai")
+    setRoutes(setFiles, COMMIT)
+    err = T.raises(function() c.run("/cc-ai/install.lua", "me/repo", "dev") end)
+    T.ok(not err:find("hard drive", 1, true), err)
+    c.fs.delete("/hdd/cc-ai")
+    T.resetTmp()
+    c = fakeComputer({ capacity = 2499, drives = { hdd = { hard = true, capacity = 2499, label = "right" } } })
+    setRoutes(setFiles, COMMIT)
+    err = T.raises(function() c.run(nil, "me/repo", "dev") end)
+    T.ok(not err:find("hard drive", 1, true), err)
+
+    -- On a hard drive: no hint about moving (to another one with room)
+    T.resetTmp()
+    c = fakeComputer({ drives = { hdd = { hard = true, capacity = 5000, label = "right" },
+      hdd2 = { hard = true, capacity = 900000, label = "back" } } })
+    setRoutes(setFiles, COMMIT)
+    out = c.run(nil, "--dir", "/hdd", "me/repo", "dev")
+    T.eq(c.read("/hdd/cc-ai/lib/ai/init.lua"), "return {}")
+    T.ok(not out:find("next update", 1, true), out)
+  end)
+
+  T.test("the installer's tests leave the real startup file and shell path as they were", function()
+    T.eq(T.readFile(STARTUP), realStartup)
+    T.eq(shell.path(), realPath)
+  end)
 
   -- The skills loader (lib/cc-code/skills). Each test loads its own copy
   -- of the module, so the agent's registry is not touched.

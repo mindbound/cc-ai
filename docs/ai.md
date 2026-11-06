@@ -6,7 +6,7 @@ Inspired by the [Vercel AI SDK](https://sdk.vercel.ai/).
 
 ## Using the library
 
-CraftOS gives each program its own `require`, so add the cc-ai libraries to `package.path` at the top of your program:
+CraftOS gives each program its own `require`, so add the cc-ai libraries to `package.path` at the top of your program. This page names the install folder `/cc-ai`. If cc-ai is in another folder, such as `/hdd/cc-ai` on a hard drive (the installer puts a new install there when a CC-Harddisks drive has room), use that folder here and in the commands below.
 
 ```lua
 package.path = "/cc-ai/lib/?.lua;/cc-ai/lib/?/init.lua;" .. package.path

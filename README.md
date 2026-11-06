@@ -30,7 +30,7 @@ YouTube: https://youtu.be/u-gIQOXLimQ
 wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
-This installs cc-code and the AI SDK into `/cc-ai` and adds `/startup/cc-ai.lua`, which puts `cc-code` on the shell path. The tests and examples are left out to save disk space: add `--full` to install them (see Installation below).
+This installs cc-code and the AI SDK into `/cc-ai` and adds `/startup/cc-ai.lua`, which puts `cc-code` on the shell path. If a hard drive of the CC-Harddisks mod is attached and has room, a new install goes to `/hdd/cc-ai` instead (see "On a hard drive" below). The tests and examples are left out to save disk space: add `--full` to install them (see Installation below).
 
 ### Setup
 
@@ -93,6 +93,7 @@ The Basalt UI needs the same screen size as the TUI (at least 20x8). `cc-code -t
 The AI SDK provides programmatic access to AI models for your own scripts. CraftOS gives each program its own `require`, so first add the cc-ai libraries to `package.path`:
 
 ```lua
+-- (the install folder: use /hdd/cc-ai if cc-ai is on a hard drive)
 package.path = "/cc-ai/lib/?.lua;/cc-ai/lib/?/init.lua;" .. package.path
 ```
 
@@ -162,7 +163,9 @@ print(result.object.name, result.object.age)
 wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
-Update later with `/cc-ai/install` (the installer installs itself), or by running the `wget` command again. To install from a fork, a branch or another directory, use `install [--full | --minimal] [owner/repo] [branch] [directory]`.
+Update later with `/cc-ai/install`: the installer installs itself, and updates the install it belongs to. Running the `wget` command again also updates: it updates the install the startup file names (or finds), else `/cc-ai`, else `cc-ai` on a hard drive. An install without `/cc-ai/.version` (from an older installer, or copied by hand) also counts, by its `bin/cc-code.lua`. To install from a fork, a branch or into another folder, use `install [--full | --minimal] [--dir <folder>] [owner/repo] [branch] [folder]`: the folder can be given with `--dir` or as the third argument.
+
+This README names the install folder `/cc-ai`. If cc-ai is in another folder, such as `/hdd/cc-ai` on a hard drive, use that folder instead.
 
 There are two install sets:
 
@@ -173,9 +176,33 @@ Neither set contains `vendor/`, the library of the Basalt UI. The first time you
 
 Choose with `--full` or `--minimal` anywhere in the arguments, for example `/cc-ai/install --full` or `wget run <url> --full`. The installer records the choice in `/cc-ai/.version`, and an update without an option keeps it. An update to a minimal install deletes `tests/` and `examples/`.
 
-Why minimal is the default: an update downloads the new files next to the old install and replaces it only when every file has arrived, so it needs room for both. A computer's disk holds 1 MB by default (`computer_space_limit` in the server config), which is not enough for two full installs. An update of a minimal install needs about 760 KB for the old and the new files together, which leaves about 240 KB of the default disk for your own files (about 200 KB less while the Basalt UI's downloads are there). Before it downloads, the installer checks the free space. An update from a full to a minimal install deletes `tests/` and `examples/` first, so the download can use their space. If the new files fit only without the Basalt UI's download, the installer also deletes `/cc-ai/vendor` first and prints `Deleted /cc-ai/vendor/basalt.lua to make room; the Basalt UI downloads it again.` (On the default 1 MB disk, a minimal install with the Basalt UI's downloads and the new files of its update together take nearly all of it.) If the new files don't fit even then, the installer stops, says how many KB it needs and how many are free, and changes nothing: free some space, or use a minimal install.
+Why minimal is the default: an update downloads the new files next to the old install and replaces it only when every file has arrived, so it needs room for both. A computer's disk holds 1 MB by default (`computer_space_limit` in the server config), which is not enough for two full installs. An update of a minimal install needs about 760 KB for the old and the new files together, which leaves about 240 KB of the default disk for your own files (about 200 KB less while the Basalt UI's downloads are there). Before it downloads, the installer checks the free space. An update from a full to a minimal install deletes `tests/` and `examples/` first, so the download can use their space. If the new files fit only without the Basalt UI's download, the installer also deletes `/cc-ai/vendor` first and prints `Deleted /cc-ai/vendor/basalt.lua to make room; the Basalt UI downloads it again.` (On the default 1 MB disk, a minimal install with the Basalt UI's downloads and the new files of its update together take nearly all of it.) If the new files don't fit even then, the installer stops, says how many KB it needs and how many are free, and changes nothing: free some space, use a minimal install, or move cc-ai to a hard drive (see below).
 
 The installer looks up the branch's current commit and downloads every file from that commit, so an update right after a push can't mix old and new files (raw.githubusercontent.com caches branch URLs for about 5 minutes). It writes the commit to `/cc-ai/.version`, and cc-code shows it at startup, for example `Welcome to cc-code v0.2.0 (f3e7a15)`. GitHub's file listing can itself be up to a minute old, so a push may take that long to show up.
+
+#### On a hard drive (CC-Harddisks)
+
+The [CC-Harddisks](https://modrinth.com/mod/cc-harddisks) mod adds hard drives. A drive's fixed platter holds 2 MB (Sparrow drive) or 4 MB (Magpie drive) by default. It is mounted at `/hdd` on each computer that the drive is attached to; a second drive is mounted at `/hdd2`, and so on. A full install and its updates fit there easily.
+
+- **New install:** if no install exists, the installer installs into `cc-ai` on the attached hard drive with the most free space, if the files fit there (for example `/hdd/cc-ai`). Otherwise it installs into `/cc-ai`. It prints the folder it chose. To choose the folder yourself, add `--dir`. For example, `wget run <url> --dir /cc-ai` installs on the computer's own disk. `--dir /hdd` installs into `/hdd/cc-ai`: when you give a drive's own folder, the installer installs into `cc-ai` on that drive. The installer never chooses a cartridge (mounted at `/disk` like a floppy disk), because a cartridge can be removed. You can still give one with `--dir`.
+- **Moving an install to a hard drive:** move its folder, then update it with the `wget` command, naming the new folder:
+
+  ```
+  mv /cc-ai /hdd/cc-ai
+  wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua --dir /hdd/cc-ai
+  ```
+
+  The update changes the startup file and the shell path to the new folder. It keeps your install's settings and files: the full or minimal choice, and the Basalt UI's download. After that, `/hdd/cc-ai/install` updates the install in `/hdd/cc-ai`. Don't run the moved install's own installer for this first update: an install made before the installer knew about hard drives has an older installer, which installs into `/cc-ai` unless it is given a folder. If the `wget` command answers `Unknown option --dir`, GitHub still serves an older installer from its cache (for a few minutes after a change): run it again later. `mv` copies the files to the other drive and then deletes the old ones, so the hard drive needs room for the whole install. If `/hdd/cc-ai` already exists, `mv` would put cc-ai inside it: delete or rename that folder first.
+- **Installing a second copy:** if you install with `--dir` while another install is in use, the startup file changes to the new install. The installer then says that the old install is no longer used here, and how to delete it (`rm /cc-ai`) if no other computer uses it. If the old install has your own files in its skills folder, the installer names them, so you can move them first.
+- **Folders the installer refuses:** before it downloads anything, the installer stops in these cases:
+  - with `--dir /hdd` (or `/hdd2`, `/disk` and so on) when no drive is mounted there. Otherwise the install would go to a plain folder on the computer's disk, and the drive would then be mounted under another name;
+  - with a folder that has `lib`, `bin`, `docs`, `examples` or `tests` in it but is not a cc-ai install, because the install replaces those folders;
+  - with `/`, a folder above it (`..`), or a read-only folder.
+
+  A folder that does not start with `/` is relative to the current folder, as in other programs.
+- **Space hints:** if the next update of an install on the computer's own disk will not fit, the installer says so and names a hard drive with room. If an update does not fit at all, the error message also names that hard drive.
+- **Startup:** the startup file names the install's folder. If cc-ai is not in that folder at startup, the startup file looks for cc-ai at the same place on the other drives. This happens after a move with `mv`, or when the drive is mounted under another name: with two hard drives, the order in which the computer attaches them decides which one is `/hdd`. It looks on the hard drives first, then on other drives (disks and cartridges), then in the computer's own folders. If the install was on the computer's own disk, it looks there first, so after `mv /cc-ai /hdd/cc-ai` it finds `/hdd/cc-ai`. If nothing is mounted under the name of the install's drive (for example `/hdd2` after the other hard drive was removed, so this one is `/hdd` now), it looks on the other drives only, never on the computer's own disk. An old copy there is not the install. If it finds cc-ai nowhere, it puts the named folder on the shell path, so cc-code works when the drive is attached a moment later (when it is not attached yet, or its wired modem is off). The installer looks for the install in the same way. If the drive that the startup file names is not mounted and the install is on no other drive, `wget run` stops before it changes anything, instead of making a second install on the computer's disk. Attach the drive, or choose a folder with `--dir`.
+- **Breaking the drive:** the data stays on the drive. A broken drive drops as an item that keeps its fixed platter, and the install is there again when you place the drive.
 
 Put your own cc-code skills in `/.cc-code/skills/`: updates replace everything in `/cc-ai/lib`. If you put files into `/cc-ai/lib/cc-code/skills/` anyway, the installer keeps them, says so, and renames a file whose name cc-ai starts to use itself (for example to `tools.lua.user`, which does not load).
 

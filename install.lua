@@ -1,37 +1,59 @@
 -- cc-ai installer
 -- In-game:  wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
--- Options:  install [--full | --minimal] [owner/repo] [branch] [directory]
--- Installs lib/, bin/, docs/ and this installer into /cc-ai (--full adds
--- examples/ and tests/, and the Basalt UI's code, which cc-code otherwise
--- downloads when it is used) and adds a startup file that puts cc-code on
--- the shell path. Update later by running /cc-ai/install, which keeps the
--- previous choice of --full or --minimal unless given another.
+-- Options:  install [--full | --minimal] [--dir <folder>] [owner/repo] [branch] [folder]
+-- Installs lib/, bin/, docs/ and this installer (--full adds examples/ and
+-- tests/, and the Basalt UI's code, which cc-code otherwise downloads when
+-- it is used) and adds a startup file that puts cc-code on the shell path.
+-- The folder is the one given (--dir, or the third argument; a drive's own
+-- folder, such as /hdd, means cc-ai on that drive). Otherwise it is the
+-- install this installer belongs to (/hdd/cc-ai/install updates /hdd/cc-ai),
+-- else an install that exists (the one the startup file names, /cc-ai, or
+-- cc-ai on a hard drive). A new install goes to cc-ai on the hard drive
+-- with the most free space (the CC-Harddisks mod) if the files fit there,
+-- else to /cc-ai. An update keeps the previous choice of --full or
+-- --minimal unless given another.
 -- Every file comes from one commit: the branch is resolved to its commit
 -- first, because raw.githubusercontent.com caches branch URLs for minutes
 -- (an update right after a push could otherwise mix old and new files).
 
 -- The options can be anywhere; the other arguments are read by position
-local args, FULL = {}, nil
+local args, FULL, DIR_OPTION = {}, nil, nil
 do
   local given = table.pack(...)
   local n = 0
-  for i = 1, given.n do
+  local function folderOption(value)
+    if type(value) ~= "string" or value == "" or value:sub(1, 1) == "-" then
+      error("--dir needs a folder, for example --dir /hdd/cc-ai", 0)
+    end
+    return value
+  end
+  local i = 1
+  while i <= given.n do
     local value = given[i]
     if value == "--full" then
       FULL = true
     elseif value == "--minimal" then
       FULL = false
+    elseif value == "--dir" then
+      i = i + 1
+      DIR_OPTION = folderOption(given[i])
+    elseif type(value) == "string" and value:sub(1, 6) == "--dir=" then
+      DIR_OPTION = folderOption(value:sub(7))
     elseif type(value) == "string" and value:sub(1, 1) == "-" then
-      error("Unknown option " .. value .. " (use --full or --minimal)", 0)
+      error("Unknown option " .. value .. " (use --full, --minimal or --dir <folder>)", 0)
     else
       n = n + 1
       args[n] = value
     end
+    i = i + 1
   end
+end
+if DIR_OPTION and args[3] then
+  error("Give the folder once: with --dir or as the third argument", 0)
 end
 local REPO = args[1] or "mindbound/cc-ai"
 local BRANCH = args[2] or "master"
-local DIR = "/" .. fs.combine(args[3] or "/cc-ai", "")
+local DEFAULT_DIR = "/cc-ai"
 local STARTUP = "/startup/cc-ai.lua"
 
 -- Top-level entries (directories and files) that belong to an installation.
@@ -84,9 +106,260 @@ local function get(url, binary, headers)
   return body
 end
 
+-- A path as "/a/b" (fs.combine drops the leading slash)
+local function absolute(path)
+  return "/" .. fs.combine(path, "")
+end
+
+-- Whether a folder holds an install: one this installer made (.version),
+-- or one an older installer or a copy by hand made (bin/cc-code.lua)
+local function isInstall(dir)
+  return fs.isDir(dir) and (fs.exists(fs.combine(dir, ".version")) or fs.exists(fs.combine(dir, "bin/cc-code.lua")))
+end
+
+-- The nearest folder at or above path that exists ("" is the root). A
+-- path above the root ("../x") counts as the root: in CC: Tweaked it never
+-- exists, and fs.getDir("..") is "../..".
+local function existingAncestor(path)
+  local current = fs.combine(path, "")
+  while current ~= "" and not fs.exists(current) do
+    if current == ".." or current:sub(1, 3) == "../" then
+      return ""
+    end
+    current = fs.getDir(current)
+  end
+  return current
+end
+
+-- Whether a top-level folder is a drive of its own (a hard drive, a disk,
+-- rom) rather than a folder on the computer's own drive
+local function isDriveFolder(name)
+  return fs.exists(name) and fs.getDrive(name) ~= fs.getDrive("")
+end
+
+-- A top-level name that CC: Tweaked gives a drive: hdd, hdd2, ... for a
+-- hard drive's fixed platter, disk, disk2, ... for a disk or a cartridge
+local function isDriveName(name)
+  return name:match("^hdd%d*$") ~= nil or name:match("^disk%d*$") ~= nil
+end
+
+-- A folder's place within its drive, and whether that drive is not the
+-- computer's own: "/hdd/cc-ai" is "cc-ai" on a drive. (A drive name that
+-- is not mounted now counts as a drive: an older startup file may name it.)
+local function placeOf(dir)
+  local path = fs.combine(dir, "")
+  local first, rest = path:match("^([^/]+)/(.+)$")
+  if first and (isDriveFolder(first) or isDriveName(first)) then
+    return rest, true
+  end
+  return path, false
+end
+
+-- Whether the drive of a folder on another drive is not mounted now (it
+-- may be attached a moment later, as through a wired modem)
+local function driveMissing(dir, onOtherDrive)
+  local first = dir:match("^/([^/]+)/")
+  return onOtherDrive and first ~= nil and not fs.exists(first)
+end
+
+-- Where an install that was in dir is now, looked for as the startup file
+-- looks for it: in dir; else at the same place within a drive, under each
+-- hard drive (hdd, hdd2, ...), each other drive (disks, cartridges), each
+-- folder on the computer's own drive, with the computer's own root first
+-- if the install was on it, else last. While dir's drive is not mounted
+-- under its name, only on drives: it may be mounted under another name
+-- (hdd2 is hdd when the other hard drive is gone), and a copy on the
+-- computer's own drive is not the install. nil if it is nowhere. (dir
+-- counts as an install by .version too, so an interrupted update is
+-- found; elsewhere only bin/cc-code.lua counts, as for the startup file.)
+local function findInstall(dir, within, onOtherDrive)
+  if isInstall(dir) then
+    return dir
+  end
+  local missing = driveMissing(dir, onOtherDrive)
+  local own, hdds, others = {}, {}, {}
+  for _, name in ipairs(fs.list("/")) do
+    if not isDriveFolder(name) then
+      table.insert(own, name)
+    elseif name ~= "rom" then
+      table.insert(name:match("^hdd%d*$") and hdds or others, name)
+    end
+  end
+  local places = {}
+  if not onOtherDrive then
+    table.insert(places, "")
+  end
+  for _, list in ipairs(missing and { hdds, others } or { hdds, others, own }) do
+    for _, name in ipairs(list) do
+      table.insert(places, name)
+    end
+  end
+  if onOtherDrive and not missing then
+    table.insert(places, "")
+  end
+  for _, place in ipairs(places) do
+    local found = "/" .. fs.combine(place, within)
+    if fs.exists(found .. "/bin/cc-code.lua") then
+      return found
+    end
+  end
+  return nil
+end
+
+-- The entries of an install folder that an update replaces, which the
+-- installer must never take from someone else (install.lua is left out:
+-- a folder may hold just the downloaded installer)
+local REPLACED = { "bin", "docs", "examples", "lib", "tests" }
+
+-- Stop when dir holds files that are not an install's, which the install
+-- would replace
+local function checkFolder(dir)
+  if not fs.isDir(dir) or isInstall(dir) then
+    return
+  end
+  local found = {}
+  for _, name in ipairs(REPLACED) do
+    if fs.exists(fs.combine(dir, name)) then
+      table.insert(found, name)
+    end
+  end
+  if #found > 0 then
+    error(dir .. " holds files that are not cc-ai's (" .. table.concat(found, ", ") ..
+      "), which the install would replace. Choose a new or empty folder, such as " ..
+      absolute(fs.combine(dir, "cc-ai")) .. ".", 0)
+  end
+end
+
+-- Space in KB, as the messages show it
+local function kb(bytes)
+  return math.floor(bytes / 1000) .. " KB"
+end
+
+-- The hard drives attached (the CC-Harddisks mod: peripheral type
+-- "hard_drive"; each drive's fixed platter is mounted at /hdd, /hdd2, ...),
+-- as { path = "/hdd", free = bytes or nil }, the most free space first
+local function hardDrives()
+  local drives = {}
+  if type(peripheral) ~= "table" or type(peripheral.find) ~= "function" then
+    return drives
+  end
+  local ok, found = pcall(function() return table.pack(peripheral.find("hard_drive")) end)
+  if not ok then
+    return drives
+  end
+  for i = 1, found.n do
+    local drive = found[i]
+    local okMount, mount = pcall(function() return drive.getFixedMountPath() end)
+    if okMount and type(mount) == "string" and fs.combine(mount, "") ~= "" then
+      local okFree, free = pcall(fs.getFreeSpace, mount)
+      table.insert(drives, { path = absolute(mount), free = okFree and type(free) == "number" and free or nil })
+    end
+  end
+  table.sort(drives, function(a, b)
+    if (a.free or -1) ~= (b.free or -1) then
+      return (a.free or -1) > (b.free or -1)
+    end
+    return a.path < b.path
+  end)
+  return drives
+end
+
+-- Whether a path (as "/a/b") is on a drive found by hardDrives
+local function onDrive(path, drive)
+  return (path .. "/"):find(drive.path .. "/", 1, true) == 1
+end
+
+-- What the startup file says: the install folder it names (an older
+-- installer wrote only its bin folder), and the install's place within its
+-- drive (for an older startup file: worked out from the folder). nil if
+-- there is no startup file of the installer's.
+local STARTUP_DIR, STARTUP_WITHIN, STARTUP_ON_DRIVE
+do
+  local handle = fs.open(STARTUP, "r")
+  if handle then
+    local text = handle.readAll() or ""
+    handle.close()
+    local dir = text:match("\nlocal dir = \"(/[^\"\n]*)\"") or text:match("\nlocal binDir = \"(/[^\"\n]*)/bin\"")
+    if dir then
+      STARTUP_DIR = absolute(dir)
+      local within, onDrive = text:match("\n  local within, onDrive = \"([^\"\n]*)\", (%a+)\n")
+      if within then
+        STARTUP_WITHIN, STARTUP_ON_DRIVE = within, onDrive == "true"
+      else
+        STARTUP_WITHIN, STARTUP_ON_DRIVE = placeOf(STARTUP_DIR)
+      end
+    end
+  end
+end
+-- The install the startup file puts on the shell path now (nil if none)
+local IN_USE = STARTUP_DIR and findInstall(STARTUP_DIR, STARTUP_WITHIN, STARTUP_ON_DRIVE)
+
+-- The install's folder (see the top of this file). For a new install that
+-- is not given one it stays nil until the file listing: the hard drive is
+-- chosen by the space the files need. OWN: the running installer is the
+-- install's own (so the installer in DIR is this version).
+local DIR, OWN
+do
+  local given = DIR_OPTION or args[3]
+  if given then
+    -- (relative to the current folder, as other programs take paths)
+    if type(shell) == "table" and type(shell.resolve) == "function" then
+      given = shell.resolve(given)
+    end
+    DIR = absolute(given)
+    local first = DIR:match("^/([^/]+)")
+    if not first or first == ".." then
+      error("Choose a folder to install into, such as " .. DEFAULT_DIR, 0)
+    end
+    if isDriveFolder(first) then
+      if DIR == "/" .. first then
+        DIR = absolute(fs.combine(first, "cc-ai"))
+      end
+    elseif isDriveName(first) then
+      error("No drive is mounted at /" .. first .. ". Attach it (or turn on its wired modem) and run the" ..
+        " installer again, or choose another folder.", 0)
+    end
+  else
+    -- The installer of an install (shell.run loads it as "@/<path>")
+    local info = debug and debug.getinfo and debug.getinfo(1, "S")
+    local file = info and type(info.source) == "string" and info.source:match("^@(.+)$")
+    if file and fs.getName(file) == "install.lua" and fs.getDir(file) ~= "" and isInstall(fs.getDir(file)) then
+      DIR, OWN = absolute(fs.getDir(file)), true
+    else
+      -- The install in use is on a drive that is not mounted: don't make
+      -- a second one elsewhere
+      if STARTUP_DIR and not IN_USE and driveMissing(STARTUP_DIR, STARTUP_ON_DRIVE) then
+        error("The startup file names " .. STARTUP_DIR .. ", but no drive is mounted at /" ..
+          STARTUP_DIR:match("^/([^/]+)/") .. ". Attach it (or turn on its wired modem) and run the installer" ..
+          " again, or choose a folder with --dir.", 0)
+      end
+      local candidates = {}
+      if IN_USE then
+        table.insert(candidates, IN_USE)
+      end
+      table.insert(candidates, DEFAULT_DIR)
+      for _, drive in ipairs(hardDrives()) do
+        table.insert(candidates, absolute(fs.combine(drive.path, "cc-ai")))
+      end
+      for _, candidate in ipairs(candidates) do
+        if isInstall(candidate) then
+          DIR = candidate
+          break
+        end
+      end
+    end
+  end
+  if DIR then
+    if fs.isReadOnly(existingAncestor(DIR)) then
+      error("Cannot install to " .. DIR .. ": it is read-only.", 0)
+    end
+    checkFolder(DIR)
+  end
+end
+
 -- What the previous install recorded in .version, or nil
 local PREVIOUS
-do
+if DIR then
   local handle = fs.open(fs.combine(DIR, ".version"), "rb")
   if handle then
     local info = textutils.unserialize(handle.readAll() or "")
@@ -115,7 +388,7 @@ local function installsFile(path)
   return top ~= nil and installs(top) and (FULL or not FULL_ONLY_FILES[path])
 end
 
-print("Installing cc-ai (" .. SET .. ") from " .. REPO .. " (" .. BRANCH .. ") to " .. DIR)
+print("Installing cc-ai (" .. SET .. ") from " .. REPO .. " (" .. BRANCH .. ")" .. (DIR and (" to " .. DIR) or ""))
 
 -- The branch's current commit (or the branch itself if that fails: the
 -- install still works, it is just not pinned)
@@ -165,6 +438,24 @@ if #files == 0 then
   error("No files found in " .. REPO .. " (" .. BRANCH .. ")", 0)
 end
 
+-- A new install: the hard drive with the most free space, if the files fit
+-- (and its cc-ai folder is free: an install there would have been found)
+if not DIR then
+  for _, drive in ipairs(hardDrives()) do
+    local target = absolute(fs.combine(drive.path, "cc-ai"))
+    if drive.free and drive.free >= needed and not fs.exists(target) then
+      DIR = target
+      print("Installing to " .. DIR .. " (a hard drive with " .. kb(drive.free) .. " free).")
+      break
+    end
+  end
+  if not DIR then
+    DIR = DEFAULT_DIR
+    print("Installing to " .. DIR .. ".")
+  end
+  checkFolder(DIR)
+end
+
 -- Download everything into a staging directory first, so a failed download
 -- (rate limit, network, full disk) leaves the previous install working
 local STAGING = DIR .. ".download"
@@ -182,6 +473,57 @@ local function diskSize(path)
     total = total + diskSize(fs.combine(path, name))
   end
   return total
+end
+
+-- The arguments an install in dir needs to update from the same source.
+-- None for cc-ai's own: <dir>/install finds its own folder. For another
+-- repository or branch, also the folder: its installer may be older.
+local DEFAULT_SOURCE = REPO == "mindbound/cc-ai" and BRANCH == "master"
+local function whereFor(dir)
+  if DEFAULT_SOURCE then
+    return ""
+  end
+  return " " .. REPO .. " " .. BRANCH .. (dir ~= DEFAULT_DIR and (" " .. dir) or "")
+end
+local where = whereFor(DIR)
+
+-- A hard drive that DIR is not on, with size bytes free and no cc-ai
+-- folder of that name yet: the drive and the folder cc-ai would move to
+local function roomOnHardDrive(size)
+  for _, drive in ipairs(hardDrives()) do
+    if drive.free and drive.free >= size and not onDrive(DIR, drive) then
+      local target = absolute(fs.combine(drive.path, fs.getName(DIR)))
+      if not fs.exists(target) then
+        return drive, target
+      end
+    end
+  end
+end
+
+-- How to move this install to target (a folder on a hard drive). After
+-- this install, its installer is this version, which finds its own folder
+-- and has the set recorded. Before it (the not-enough-space error), the
+-- installer in DIR is this version only when it is the one running: an
+-- older one installs into /cc-ai unless given a folder, and an install
+-- copied by hand has none. Then the command is this installer, from the
+-- web, given the folder (a copy of an older one that GitHub may still
+-- serve from its cache stops at the unknown --dir, changing nothing).
+-- Not after this install: also this run's choice of --full or --minimal.
+local function moveCommands(target, installed)
+  local command
+  if installed or OWN then
+    command = target .. "/install" .. whereFor(target)
+  else
+    command = "wget run https://raw.githubusercontent.com/" .. REPO .. "/" .. BRANCH .. "/install.lua"
+    if not DEFAULT_SOURCE then
+      command = command .. " " .. REPO .. " " .. BRANCH
+    end
+    command = command .. " --dir " .. target
+  end
+  if not installed and FULL ~= (PREVIOUS ~= nil and PREVIOUS.full == true) then
+    command = command .. (FULL and " --full" or " --minimal")
+  end
+  return "mv " .. DIR .. " " .. target .. ", then " .. command
 end
 
 -- The previous install's entries that this one leaves out (examples/ and
@@ -267,7 +609,7 @@ end
 local VENDOR_DIR = fs.combine(DIR, VENDOR)
 local dropVendor = false
 do
-  local ok, free = pcall(fs.getFreeSpace, fs.getDir(DIR))
+  local ok, free = pcall(fs.getFreeSpace, existingAncestor(fs.getDir(DIR)))
   if ok and type(free) == "number" and needed > free + freed then
     if fs.exists(VENDOR_DIR) and needed <= free + freed + diskSize(VENDOR_DIR) then
       dropVendor = true
@@ -279,6 +621,21 @@ do
           " run the installer with --minimal."
       else
         message = message .. " Free some space and run the installer again."
+      end
+      -- A hard drive with room: for the install and the new files, or for
+      -- the new files of a new install
+      if fs.exists(DIR) then
+        local drive, target = roomOnHardDrive(diskSize(DIR) + needed)
+        if drive then
+          message = message .. " Or move cc-ai to the hard drive at " .. drive.path .. " (" .. kb(drive.free) ..
+            " free): " .. moveCommands(target) .. "."
+        end
+      else
+        local drive, target = roomOnHardDrive(needed)
+        if drive then
+          message = message .. " Or install it on the hard drive at " .. drive.path .. " (" .. kb(drive.free) ..
+            " free): run the installer with --dir " .. target .. "."
+        end
       end
       error(message .. " Nothing was changed.", 0)
     end
@@ -385,11 +742,56 @@ for name in pairs(INSTALL) do
 end
 fs.delete(STAGING)
 
--- Startup file: cc-code on the shell path, with completion for its options
-local binDir = fs.combine(DIR, "bin")
-local startup = ([[
+-- Startup file: cc-code on the shell path, with completion for its options.
+-- When the install is not where it was (it was moved to another drive, or
+-- its drive is mounted under another name, such as /hdd2 instead of /hdd),
+-- it looks for it as findInstall does. (The installer reads the line with
+-- within and onDrive back.)
+local binDir = DIR .. "/bin"
+local startup
+do
+  local within, onOtherDrive = placeOf(DIR)
+  startup = ([[
 -- Added by the cc-ai installer: makes `cc-code` runnable from anywhere
-local binDir = "/%s"
+local dir = "%s"
+-- Not there: moved, or its drive has another name now. While its drive
+-- is not mounted under its name, look on drives only (a copy on this
+-- computer's own drive is not it), and keep dir if it is on none: the
+-- drive may be attached a moment later.
+if not fs.exists(dir .. "/bin/cc-code.lua") then
+  local within, onDrive = "%s", %s
+  local drive = dir:match("^/([^/]+)/")
+  local missing = onDrive and drive ~= nil and not fs.exists(drive)
+  -- Hard drives, other drives, folders on this computer's own drive
+  local own, hdds, others = {}, {}, {}
+  for _, name in ipairs(fs.list("/")) do
+    if fs.getDrive(name) == fs.getDrive("") then
+      table.insert(own, name)
+    elseif name ~= "rom" then
+      table.insert(name:match("^hdd%%d*$") and hdds or others, name)
+    end
+  end
+  local places = {}
+  if not onDrive then
+    table.insert(places, "")
+  end
+  for _, list in ipairs(missing and { hdds, others } or { hdds, others, own }) do
+    for _, name in ipairs(list) do
+      table.insert(places, name)
+    end
+  end
+  if onDrive and not missing then
+    table.insert(places, "")
+  end
+  for _, place in ipairs(places) do
+    local found = "/" .. fs.combine(place, within)
+    if fs.exists(found .. "/bin/cc-code.lua") then
+      dir = found
+      break
+    end
+  end
+end
+local binDir = dir .. "/bin"
 if not (":" .. shell.path() .. ":"):find(":" .. binDir .. ":", 1, true) then
   shell.setPath(shell.path() .. ":" .. binDir)
 end
@@ -397,7 +799,8 @@ local completion = require("cc.completion")
 shell.setCompletionFunction(fs.combine(binDir, "cc-code.lua"), function(_, index, text)
   return completion.choice(text, { "--model ", "--terminal", "--basalt", "--tui", "--monochrome", "--help" })
 end)
-]]):format(binDir)
+]]):format(DIR, within, tostring(onOtherDrive))
+end
 
 -- Which commit is installed (cc-code shows it at startup), and for the next
 -- update: what the installer put into the skills folder, and whether the
@@ -417,13 +820,8 @@ do
   end
 end
 
--- The command that updates this install (with its repository, branch and
--- directory when they are not the defaults, which a bare run would use)
+-- The command that updates this install
 local installer = "/" .. fs.combine(DIR, "install")
-local where = ""
-if REPO ~= "mindbound/cc-ai" or BRANCH ~= "master" or DIR ~= "/cc-ai" then
-  where = " " .. REPO .. " " .. BRANCH .. " " .. DIR
-end
 print("Installed " .. #files .. " files (" .. SET .. ")" .. (COMMIT and (" from commit " .. COMMIT:sub(1, 7)) or "") ..
   ". Update later with: " .. installer .. where)
 if not FULL then
@@ -439,11 +837,34 @@ if #keptSkills > 0 then
   print("Move them to /.cc-code/skills, which updates never touch.")
 end
 
+-- When the next update may not fit on this disk: a hard drive with room
+do
+  local okFree, free = pcall(fs.getFreeSpace, DIR)
+  if okFree and type(free) == "number" and free < needed then
+    local onHardDrive = false
+    for _, drive in ipairs(hardDrives()) do
+      if onDrive(DIR, drive) then
+        onHardDrive = true
+      end
+    end
+    local drive, target
+    if not onHardDrive then
+      drive, target = roomOnHardDrive(diskSize(DIR) + needed)
+    end
+    if drive then
+      print("This disk has " .. kb(free) .. " free, and the next update needs about " ..
+        math.ceil(needed / 1000) .. " KB" ..
+        ". The hard drive at " .. drive.path .. " has " .. kb(drive.free) .. " free: to move cc-ai there, run " ..
+        moveCommands(target, true))
+    end
+  end
+end
+
 if fs.exists("/startup") and not fs.isDir("/startup") then
   -- A plain /startup file exists, so there is no startup directory to add to
   printError("Not adding " .. STARTUP .. ": /startup is a file.")
   print("Add this line to your startup file instead:")
-  print("  shell.setPath(shell.path() .. \":/" .. binDir .. "\")")
+  print("  shell.setPath(shell.path() .. \":" .. binDir .. "\")")
 else
   fs.makeDir(fs.getDir(STARTUP))
   local handle = fs.open(STARTUP, "w")
@@ -451,6 +872,62 @@ else
   handle.close()
   -- Apply it to this shell session too
   shell.run(STARTUP)
+  -- The startup file named another install before: take its bin folder
+  -- (the one it names, and the one it found) off this session's path, so
+  -- `cc-code` runs this install
+  local oldBins = {}
+  for _, old in ipairs({ STARTUP_DIR or DIR, IN_USE or DIR }) do
+    if old ~= DIR then
+      oldBins[fs.combine(old, "bin")] = true
+    end
+  end
+  if next(oldBins) then
+    local entries = {}
+    for entry in (shell.path() .. ":"):gmatch("([^:]*):") do
+      if entry == "" or not oldBins[fs.combine(entry, "")] then
+        table.insert(entries, entry)
+      end
+    end
+    shell.setPath(table.concat(entries, ":"))
+  end
+  if IN_USE and IN_USE ~= DIR and isInstall(IN_USE) then
+    print("The startup file now names " .. DIR .. " instead of " .. IN_USE .. ". The install in " .. IN_USE ..
+      " is no longer used here. If no other computer uses it, delete it with rm " .. IN_USE)
+    -- Files of the user's in its skills folder: what its installer did not
+    -- put there (without its list: what cc-ai does not have)
+    local oldSkills = fs.combine(IN_USE, SKILLS)
+    if fs.isDir(oldSkills) then
+      local recorded
+      local handle = fs.open(fs.combine(IN_USE, ".version"), "rb")
+      if handle then
+        local info = textutils.unserialize(handle.readAll() or "")
+        handle.close()
+        if type(info) == "table" and type(info.skills) == "table" then
+          recorded = {}
+          for _, name in ipairs(info.skills) do
+            recorded[name] = true
+          end
+        end
+      end
+      if not recorded then
+        recorded = {}
+        for _, name in ipairs(installedSkills) do
+          recorded[name] = true
+        end
+      end
+      local mine = {}
+      for _, name in ipairs(fs.list(oldSkills)) do
+        if not recorded[name] then
+          table.insert(mine, name)
+        end
+      end
+      table.sort(mine)
+      if #mine > 0 then
+        print("Before you delete it, move your files in /" .. oldSkills .. " to /.cc-code/skills: " ..
+          table.concat(mine, ", "))
+      end
+    end
+  end
 end
 
 print("")

@@ -8,7 +8,7 @@ Interactive AI coding agent for ComputerCraft: Tweaked.
 wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
-This makes a minimal install (`lib/`, `bin/`, `docs/` without the Basalt UI's code, which cc-code downloads when you use it; about 380 KB), so that an update, which downloads the new files next to the old ones, fits on the default 1 MB computer disk. Add `--full` for the tests and examples too. The README has the details.
+This makes a minimal install (`lib/`, `bin/`, `docs/` without the Basalt UI's code, which cc-code downloads when you use it; about 380 KB), so that an update, which downloads the new files next to the old ones, fits on the default 1 MB computer disk. Add `--full` for the tests and examples too. If a hard drive of the CC-Harddisks mod is attached and has room, a new install goes to `cc-ai` on it (`/hdd/cc-ai`), where there is room for a full install and its updates. To move an install there, run `mv /cc-ai /hdd/cc-ai`, then the `wget run` command above with `--dir /hdd/cc-ai` added. After that, `/hdd/cc-ai/install` updates it. Don't use the moved install's own installer for the first update: it may be older, and an older one installs into `/cc-ai` unless it is given a folder. The README has the details. This page names the install folder `/cc-ai`.
 
 ## Usage
 
