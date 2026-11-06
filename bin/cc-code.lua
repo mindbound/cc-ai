@@ -5,8 +5,14 @@
 --                         like openai/gpt-4o. Default: the cc-code.model
 --                         setting, which /model saves
 --   -t, --terminal        Force terminal mode (line-based, no TUI)
+--   -b, --basalt          Use the Basalt UI (a trial; Basalt is downloaded
+--                         to the install's vendor/ folder the first time;
+--                         the TUI runs if that fails). Default: the
+--                         cc-code.ui setting
+--       --tui             Use the standard TUI, whatever cc-code.ui says
 --   -c, --monochrome      Use monochrome colors (auto on non-advanced computers)
 --   -h, --help            Show this help message
+-- Of -t, -b and --tui, the last one given counts.
 
 -- Libraries live in ../lib relative to this program (require resolves
 -- relative paths against the running program's directory)
@@ -24,7 +30,11 @@ while i <= #args do
   elseif arg:match("^%-%-model=") then
     opts.model = arg:match("^%-%-model=(.*)$")
   elseif arg == "-t" or arg == "--terminal" then
-    opts.terminal = true
+    opts.ui = "terminal"
+  elseif arg == "-b" or arg == "--basalt" then
+    opts.ui = "basalt"
+  elseif arg == "--tui" then
+    opts.ui = "tui"
   elseif arg == "-c" or arg == "--monochrome" then
     opts.monochrome = true
   elseif arg == "-h" or arg == "--help" then
@@ -44,6 +54,9 @@ if opts.help then
   print("  -m, --model <model>   Model for this run, e.g.")
   print("                        custom:<model> or openai/gpt-4o")
   print("  -t, --terminal        Force terminal mode (no TUI)")
+  print("  -b, --basalt          Try the Basalt UI (trial,")
+  print("                        downloaded on first use)")
+  print("      --tui             Use the standard TUI")
   print("  -c, --monochrome      Use monochrome colors")
   print("  -h, --help            Show this help message")
   print("")
@@ -55,7 +68,8 @@ if opts.help then
   print("  set AI_CUSTOM_BASE_URL <url>  (custom endpoint)")
   print("")
   print("Settings: cc-code.model (saved by /model),")
-  print("  cc-code.max_steps, cc-code.max_output_tokens")
+  print("  cc-code.max_steps, cc-code.max_output_tokens,")
+  print("  cc-code.ui (tui or basalt)")
   print("")
   print("Inside cc-code: /help, /model, /clear, /exit")
   return
@@ -85,8 +99,12 @@ if opts.model then
   config.model = opts.model
 end
 
-if opts.terminal then
+if opts.ui == "terminal" then
   config.forceTerminal = true
+elseif opts.ui == "basalt" then
+  config.basalt = true
+elseif opts.ui == "tui" then
+  config.basalt = false
 end
 
 if opts.monochrome then

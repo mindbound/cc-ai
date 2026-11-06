@@ -11,13 +11,29 @@ local T = { passed = 0, failed = 0, skipped = 0, failures = {}, log = {} }
 -- skipped (T.vanillaOnly). Checked before any test sets the fake one.
 T.realUnicodeMod = type(rawget(_G, "unicode")) == "table"
 
--- Raised by T.vanillaOnly to skip the rest of a test
+-- The key of the error a skip raises: { [SKIP] = why }
 local SKIP = {}
+
+local function skip(why)
+  error({ [SKIP] = why }, 0)
+end
 
 -- Call first in a test that checks vanilla CC: Tweaked behaviour
 function T.vanillaOnly()
   if T.realUnicodeMod then
-    error(SKIP, 0)
+    skip("needs vanilla CC: Tweaked: the Unicode mod is installed")
+  end
+end
+
+-- Call first in a test that needs the real Basalt bundle: <T.root>/
+-- vendor/basalt.lua, the build cc-code expects (the fork commit, elements
+-- and modules in its header). The installer does not install it (cc-code
+-- downloads it the first time the Basalt UI runs), so in-game it may be
+-- missing or left from an older version. The test is then skipped.
+function T.needsBasalt()
+  local loader = require("cc-code.basalt.load")
+  if not loader.fileMatches(T.root .. "/" .. loader.PATH) then
+    skip("needs vendor/basalt.lua: run cc-code --basalt once to download it")
   end
 end
 
@@ -27,9 +43,9 @@ end
 
 function T.test(name, fn)
   local ok, err = pcall(fn)
-  if not ok and err == SKIP then
+  if not ok and type(err) == "table" and err[SKIP] then
     T.skipped = T.skipped + 1
-    T.print("  skip " .. name .. " (needs vanilla CC: Tweaked: the Unicode mod is installed)")
+    T.print("  skip " .. name .. " (" .. err[SKIP] .. ")")
   elseif ok then
     T.passed = T.passed + 1
     T.print("  ok   " .. name)

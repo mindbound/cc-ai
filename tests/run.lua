@@ -29,18 +29,20 @@ http = { post = T.http.post, get = T.http.get, request = T.http.request, checkUR
 local savedSettings = {}
 local SAVED = { "AI_GATEWAY_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
   "AI_CUSTOM_API_KEY", "AI_CUSTOM_BASE_URL", "ai.http_timeout",
-  "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens", "cc-code.tools" }
+  "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens", "cc-code.tools", "cc-code.ui" }
 for _, name in ipairs(SAVED) do
   savedSettings[name] = settings.get(name)
 end
-for _, name in ipairs({ "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens", "cc-code.tools" }) do
+for _, name in ipairs({ "cc-code.model", "cc-code.max_steps", "cc-code.max_output_tokens", "cc-code.tools",
+  "cc-code.ui" }) do
   settings.unset(name)
 end
 local realSave = settings.save
 T.saves = 0
 settings.save = function() T.saves = T.saves + 1 return true end
 
-local suites = { "test_files", "test_capture", "test_ai", "test_agent", "test_install", "test_skills", "test_ui" }
+local suites = { "test_files", "test_capture", "test_ai", "test_agent", "test_install", "test_skills", "test_ui",
+  "test_basalt_load", "test_basaltui" }
 local only = args[1]
 
 for _, name in ipairs(suites) do

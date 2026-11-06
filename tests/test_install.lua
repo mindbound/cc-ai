@@ -438,6 +438,154 @@ return function(T)
     T.eq(T.readFile(dir .. "/lib/cc-code/skills/mine.lua"), string.rep("m", 600), "kept")
   end)
 
+  T.test("the Basalt UI's download is deleted only when the update needs its room", function()
+    T.resetTmp()
+    -- staging 500 + lib 500 + lib/ai 500 + the file 5000 = 6500
+    local files = { ["lib/ai/init.lua"] = string.rep("x", 5000) }
+    setRoutes(files, COMMIT)
+    install(dir)
+    -- vendor/ (500) and the bundle (1200): 1700
+    local bundle = dir .. "/vendor/basalt.lua"
+    T.writeFile(bundle, string.rep("b", 1200))
+    local function withFree(free, fn)
+      withReplaced(fs, "getFreeSpace", function() return free end, fn)
+    end
+    local message = "Deleted " .. bundle .. " to make room; the Basalt UI downloads it again."
+
+    -- Fits without deleting it
+    setRoutes(files, COMMIT)
+    local out
+    withFree(6500, function() out = installPrinting(dir) end)
+    T.eq(T.readFile(bundle), string.rep("b", 1200), "kept")
+    T.ok(not out:find("Deleted", 1, true), out)
+
+    -- Doesn't fit even without it: the usual error, nothing deleted
+    setRoutes(files, COMMIT)
+    local err = T.raises(function() withFree(4799, function() installPrinting(dir) end) end)
+    T.eq(err, "Not enough disk space: the minimal install needs 7 KB, but only 4 KB are free." ..
+      " Free some space and run the installer again. Nothing was changed.")
+    T.eq(#rawDownloads(), 0, "nothing downloaded")
+    T.eq(T.readFile(bundle), string.rep("b", 1200), "nothing deleted")
+
+    -- Fits only without it: deleted before the download, with a line
+    setRoutes(files, COMMIT)
+    local during
+    local realGet = http.get
+    withReplaced(http, "get", function(url, ...)
+      if during == nil and type(url) == "string" and url:find("raw.githubusercontent", 1, true) then
+        during = fs.exists(dir .. "/vendor")
+      end
+      return realGet(url, ...)
+    end, function()
+      withFree(4800, function() out = installPrinting(dir) end)
+    end)
+    T.eq(during, false, "vendor/ deleted before the download")
+    T.contains(out, message .. "\n")
+    T.ok(not fs.exists(dir .. "/vendor"), "vendor/ deleted")
+    T.eq(T.readFile(dir .. "/lib/ai/init.lua"), string.rep("x", 5000), "installed")
+
+    -- The entries a minimal update drops count first: vendor/ stays when
+    -- they make room. (tests/: the folder 500 and the file 1500: 2000)
+    local full = { ["lib/ai/init.lua"] = string.rep("x", 5000), ["tests/run.lua"] = string.rep("t", 1500) }
+    setRoutes(full, COMMIT)
+    install(dir, "--full")
+    T.writeFile(bundle, string.rep("b", 1200))
+    setRoutes(full, COMMIT)
+    withFree(4500, function() out = installPrinting(dir, "--minimal") end)
+    T.ok(not fs.exists(dir .. "/tests"), "minimal now")
+    T.eq(T.readFile(bundle), string.rep("b", 1200), "kept: the dropped tests/ made room")
+    T.ok(not out:find("Deleted", 1, true), out)
+    -- ... and it goes when they are not enough
+    setRoutes(full, COMMIT)
+    install(dir, "--full")
+    setRoutes(full, COMMIT)
+    withFree(4499, function() out = installPrinting(dir, "--minimal") end)
+    T.contains(out, message .. "\n")
+    T.ok(not fs.exists(dir .. "/vendor"), "deleted after counting tests/")
+  end)
+
+  -- The Basalt UI's files a minimal install leaves out (cc-code downloads
+  -- them when the Basalt UI is used; the loader has the list)
+  local UI_FILES = require("cc-code.basalt.load").UI_FILES
+
+  T.test("a minimal install leaves out the Basalt UI's code; a full install has it", function()
+    T.resetTmp()
+    local files = {
+      ["lib/ai/init.lua"] = "return {}",
+      ["lib/cc-code/basalt/load.lua"] = "-- loader",
+      ["lib/cc-code/basalt/app.lua.orig"] = "-- not listed",
+    }
+    for _, rel in ipairs(UI_FILES) do
+      files[rel] = "-- " .. rel
+    end
+    local function requested(rel)
+      for _, url in ipairs(rawDownloads()) do
+        if url:sub(-(select(2, rel:find("$")) + 1)) == "/" .. rel then return true end
+      end
+      return false
+    end
+
+    setRoutes(files, COMMIT)
+    local out = installPrinting(dir)
+    T.eq(T.readFile(dir .. "/lib/cc-code/basalt/load.lua"), "-- loader", "the loader is installed")
+    T.eq(T.readFile(dir .. "/lib/cc-code/basalt/app.lua.orig"), "-- not listed", "by path, not by prefix")
+    for _, rel in ipairs(UI_FILES) do
+      T.ok(not fs.exists(dir .. "/" .. rel), rel .. " left out")
+      T.ok(not requested(rel), rel .. " not downloaded")
+    end
+    T.contains(out, "Installed 3 files (minimal)")
+
+    setRoutes(files, COMMIT)
+    out = installPrinting(dir, "--full")
+    for _, rel in ipairs(UI_FILES) do
+      T.eq(T.readFile(dir .. "/" .. rel), "-- " .. rel, rel .. " in a full install")
+    end
+    T.contains(out, "Installed 6 files (full)")
+
+    -- An update to a minimal install deletes them with lib/, also the ones
+    -- the Basalt UI downloaded (it downloads them again, from the new commit)
+    setRoutes(files, COMMIT)
+    install(dir, "--minimal")
+    for _, rel in ipairs(UI_FILES) do
+      T.ok(not fs.exists(dir .. "/" .. rel), rel .. " deleted")
+    end
+    T.writeFile(dir .. "/lib/cc-code/basalt/ui.lua", "-- downloaded by cc-code")
+    setRoutes(files, COMMIT)
+    install(dir)
+    T.ok(not fs.exists(dir .. "/lib/cc-code/basalt/ui.lua"), "a downloaded one is deleted too")
+    T.eq(T.readFile(dir .. "/lib/cc-code/basalt/load.lua"), "-- loader")
+  end)
+
+  T.test("the space check counts the Basalt UI's code only in a full install", function()
+    T.resetTmp()
+    -- Minimal: staging, lib, lib/cc-code and lib/cc-code/basalt 4 x 500,
+    -- and load.lua 1000: 3000. Full: also the UI's files, 2000 + 3000 +
+    -- 500 (300 bytes): 8500.
+    local files = {
+      ["lib/cc-code/basalt/load.lua"] = string.rep("l", 1000),
+      ["lib/cc-code/basalt/app.lua"] = string.rep("a", 2000),
+      ["lib/cc-code/basalt/ui.lua"] = string.rep("u", 3000),
+      ["lib/cc-code/basalt/log.lua"] = string.rep("g", 300),
+    }
+    local function withFree(free, fn)
+      withReplaced(fs, "getFreeSpace", function() return free end, fn)
+    end
+    setRoutes(files, COMMIT)
+    local err = T.raises(function() withFree(2999, function() install(dir) end) end)
+    T.eq(err, "Not enough disk space: the minimal install needs 3 KB, but only 2 KB are free." ..
+      " Free some space and run the installer again. Nothing was changed.")
+    setRoutes(files, COMMIT)
+    withFree(3000, function() install(dir) end)
+    T.ok(fs.exists(dir .. "/lib/cc-code/basalt/load.lua"), "it fits exactly")
+
+    setRoutes(files, COMMIT)
+    err = T.raises(function() withFree(8499, function() install(dir, "--full") end) end)
+    T.contains(err, "the full install needs 9 KB, but only 8 KB are free.")
+    setRoutes(files, COMMIT)
+    withFree(8500, function() install(dir, "--full") end)
+    T.eq(T.readFile(dir .. "/lib/cc-code/basalt/log.lua"), string.rep("g", 300), "it fits exactly")
+  end)
+
   T.test("the space check is skipped when the free space is unknown", function()
     setRoutes(setFiles, COMMIT)
     withReplaced(fs, "getFreeSpace", function() return "unlimited" end, function() install(dir) end)
@@ -657,5 +805,36 @@ return function(T)
     -- Without reserved names, only duplicates are left out
     T.eq(names(skills.getAllTools()), "read_file,shared,b_only")
     T.eq(skills.getAllTools(reserved)[1], skills.get("a").tools[2], "the first skill's tool is offered")
+  end)
+
+  T.test("the installer and the Basalt loader list the same UI files", function()
+    -- install.lua runs on its own (wget), so it can't require load.lua:
+    -- the two lists must be kept equal by hand, and every Basalt UI module
+    -- but the loader must be in them
+    local loader = require("cc-code.basalt.load")
+    local source = T.readFile(T.root .. "/install.lua")
+    local block = source:match("local FULL_ONLY_FILES = (%b{})")
+    T.ok(block, "FULL_ONLY_FILES found in install.lua")
+    local fromInstaller = {}
+    for path in block:gmatch('%["([^"]+)"%]%s*=%s*true') do
+      fromInstaller[#fromInstaller + 1] = path
+    end
+    table.sort(fromInstaller)
+    local fromLoader = {}
+    for i, path in ipairs(loader.UI_FILES) do
+      fromLoader[i] = path
+    end
+    table.sort(fromLoader)
+    T.eq(table.concat(fromInstaller, ","), table.concat(fromLoader, ","))
+    local listed = {}
+    for _, path in ipairs(fromLoader) do
+      listed[path] = true
+    end
+    for _, name in ipairs(fs.list(T.root .. "/lib/cc-code/basalt")) do
+      local path = "lib/cc-code/basalt/" .. name
+      if name ~= "load.lua" then
+        T.ok(listed[path], path .. " is in UI_FILES and FULL_ONLY_FILES")
+      end
+    end
   end)
 end

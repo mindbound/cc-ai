@@ -144,8 +144,9 @@ local function getCompletions(args)
   return results
 end
 
--- Register the completion handler with both UI modules (TUI and line mode)
-for _, uiName in ipairs({ "cc-code.tui", "cc-code.terminal" }) do
+-- Register the completion handler with the UI modules (TUI, line mode and
+-- the Basalt UI, which is requirable without Basalt loaded)
+for _, uiName in ipairs({ "cc-code.tui", "cc-code.terminal", "cc-code.basalt.ui" }) do
   local ok, ui = pcall(require, uiName)
   if ok and type(ui) == "table" and ui.registerCompletion then
     ui.registerCompletion("/model", getCompletions, "Models")

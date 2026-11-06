@@ -2,8 +2,9 @@
 -- In-game:  wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 -- Options:  install [--full | --minimal] [owner/repo] [branch] [directory]
 -- Installs lib/, bin/, docs/ and this installer into /cc-ai (--full adds
--- examples/ and tests/) and adds a startup file that puts cc-code on the
--- shell path. Update later by running /cc-ai/install, which keeps the
+-- examples/ and tests/, and the Basalt UI's code, which cc-code otherwise
+-- downloads when it is used) and adds a startup file that puts cc-code on
+-- the shell path. Update later by running /cc-ai/install, which keeps the
 -- previous choice of --full or --minimal unless given another.
 -- Every file comes from one commit: the branch is resolved to its commit
 -- first, because raw.githubusercontent.com caches branch URLs for minutes
@@ -39,10 +40,23 @@ local INSTALL = {
   lib = true, bin = true, docs = true, examples = true, tests = true,
   ["install.lua"] = true,
 }
--- The entries only a full install has (about 260 KB). An update needs room
+-- The entries only a full install has (about 380 KB). An update needs room
 -- for the old and the new install at once, and a computer's disk holds
 -- 1 MB by default, so the default is a minimal install.
 local FULL_ONLY = { examples = true, tests = true }
+-- Files in the installed entries that only a full install has: the Basalt
+-- UI's code (a trial, about 58 KB). cc-code downloads them, from the
+-- installed commit, the first time the Basalt UI runs (lib/cc-code/basalt/
+-- load.lua, which has the same list). An update deletes them with lib/.
+local FULL_ONLY_FILES = {
+  ["lib/cc-code/basalt/app.lua"] = true,
+  ["lib/cc-code/basalt/ui.lua"] = true,
+  ["lib/cc-code/basalt/log.lua"] = true,
+}
+-- Not an installed entry: the Basalt UI downloads vendor/basalt.lua there
+-- (143 KB) the first time it runs. An update leaves it in place, unless
+-- the new files fit only without it: it can be downloaded again.
+local VENDOR = "vendor"
 
 if not http then
   printError("The HTTP API is disabled. Enable it in the ComputerCraft config.")
@@ -95,6 +109,12 @@ local function installs(name)
   return INSTALL[name] and (FULL or not FULL_ONLY[name])
 end
 
+-- Whether this install downloads a file of the repository (its path)
+local function installsFile(path)
+  local top = path:match("^[^/]+")
+  return top ~= nil and installs(top) and (FULL or not FULL_ONLY_FILES[path])
+end
+
 print("Installing cc-ai (" .. SET .. ") from " .. REPO .. " (" .. BRANCH .. ") to " .. DIR)
 
 -- The branch's current commit (or the branch itself if that fails: the
@@ -130,8 +150,7 @@ end
 -- is the staging directory)
 local files, needed, dirs = {}, 500, {}
 for _, entry in ipairs(tree.tree) do
-  local top = entry.path:match("^[^/]+")
-  if entry.type == "blob" and top and installs(top) then
+  if entry.type == "blob" and installsFile(entry.path) then
     table.insert(files, entry.path)
     needed = needed + math.max(tonumber(entry.size) or 0, 500)
     local dir = fs.getDir(entry.path)
@@ -242,24 +261,39 @@ do
 end
 
 -- Stop before changing anything if the new files don't fit next to the
--- previous install (the download would fail with "Out of space")
+-- previous install (the download would fail with "Out of space"). When
+-- they fit only without the Basalt UI's download (vendor/), that is
+-- deleted too: as a last resort, because it is downloaded again.
+local VENDOR_DIR = fs.combine(DIR, VENDOR)
+local dropVendor = false
 do
   local ok, free = pcall(fs.getFreeSpace, fs.getDir(DIR))
   if ok and type(free) == "number" and needed > free + freed then
-    local message = ("Not enough disk space: the %s install needs %d KB, but only %d KB are free."):format(
-      SET, math.ceil(needed / 1000), math.floor((free + freed) / 1000))
-    if FULL then
-      message = message .. " Free some space, or leave out the tests and examples:" ..
-        " run the installer with --minimal."
+    if fs.exists(VENDOR_DIR) and needed <= free + freed + diskSize(VENDOR_DIR) then
+      dropVendor = true
     else
-      message = message .. " Free some space and run the installer again."
+      local message = ("Not enough disk space: the %s install needs %d KB, but only %d KB are free."):format(
+        SET, math.ceil(needed / 1000), math.floor((free + freed) / 1000))
+      if FULL then
+        message = message .. " Free some space, or leave out the tests and examples:" ..
+          " run the installer with --minimal."
+      else
+        message = message .. " Free some space and run the installer again."
+      end
+      error(message .. " Nothing was changed.", 0)
     end
-    error(message .. " Nothing was changed.", 0)
   end
 end
 
 for _, path in ipairs(dropped) do
   fs.delete(path)
+end
+if dropVendor then
+  -- (named by the bundle in it, else by the folder: a partial download)
+  local bundle = fs.combine(VENDOR_DIR, "basalt.lua")
+  local deleted = "/" .. (fs.exists(bundle) and bundle or VENDOR_DIR)
+  fs.delete(VENDOR_DIR)
+  print("Deleted " .. deleted .. " to make room; the Basalt UI downloads it again.")
 end
 
 local rawBase = "https://raw.githubusercontent.com/" .. REPO .. "/" .. REF .. "/"
@@ -361,7 +395,7 @@ if not (":" .. shell.path() .. ":"):find(":" .. binDir .. ":", 1, true) then
 end
 local completion = require("cc.completion")
 shell.setCompletionFunction(fs.combine(binDir, "cc-code.lua"), function(_, index, text)
-  return completion.choice(text, { "--model ", "--terminal", "--monochrome", "--help" })
+  return completion.choice(text, { "--model ", "--terminal", "--basalt", "--tui", "--monochrome", "--help" })
 end)
 ]]):format(binDir)
 

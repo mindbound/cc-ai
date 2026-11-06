@@ -8,7 +8,7 @@ Interactive AI coding agent for ComputerCraft: Tweaked.
 wget run https://raw.githubusercontent.com/mindbound/cc-ai/master/install.lua
 ```
 
-This makes a minimal install (`lib/`, `bin/`, `docs/`; about 350 KB), so that an update, which downloads the new files next to the old ones, fits on the default 1 MB computer disk. Add `--full` for the tests and examples too. The README has the details.
+This makes a minimal install (`lib/`, `bin/`, `docs/` without the Basalt UI's code, which cc-code downloads when you use it; about 380 KB), so that an update, which downloads the new files next to the old ones, fits on the default 1 MB computer disk. Add `--full` for the tests and examples too. The README has the details.
 
 ## Usage
 
@@ -20,9 +20,14 @@ cc-code [options]
                         openai, groq, custom) or a gateway model such as
                         openai/gpt-4o. Default: the model /model saved
   -t, --terminal        Force terminal mode (line-based, no TUI)
+  -b, --basalt          Use the Basalt UI (a trial; Basalt is downloaded
+                        the first time, and the TUI runs if that fails)
+      --tui             Use the TUI, whatever the cc-code.ui setting says
   -c, --monochrome      Use monochrome colors (automatic on non-advanced computers)
   -h, --help            Show help
 ```
+
+When you give more than one of `-t`, `-b` and `--tui`, the last one counts. Without them, the `cc-code.ui` setting chooses between the TUI (the default) and the Basalt UI.
 
 ### Programmatic
 
@@ -145,6 +150,36 @@ Works on every computer, turtle, pocket computer and monitor. Features:
 - Command autocomplete popup (Tab)
 - Command history (Up/Down)
 
+### Basalt UI (trial)
+
+A second full-screen UI, built on [Basalt](https://github.com/mindbound/Basalt2) (a fork of Pyroxenium's Basalt 2.5). The TUI stays the default. To use the Basalt UI for one run, start `cc-code --basalt` (`-b`). To use it every time, run `set cc-code.ui basalt`. Then `cc-code --tui` starts the TUI for one run.
+
+The installer does not install Basalt, and a minimal install (the default) does not contain the Basalt UI's own code either. The first time the Basalt UI starts, cc-code downloads what is missing from the cc-ai commit in `/cc-ai/.version`: `vendor/basalt.lua` (143 KB) into `/cc-ai/vendor/`, and the Basalt UI's code (`app.lua`, `ui.lua` and `log.lua`, about 58 KB) into `/cc-ai/lib/cc-code/basalt/`:
+- Before it writes anything, cc-code checks the free disk space for all the files. It writes each file under a temporary name and renames them only when every download is complete, so a failed download writes none of them and never leaves a partial file.
+- cc-code accepts `vendor/basalt.lua` only when its header names the Basalt commit, elements and modules that this version of cc-code expects. A file of another build (left by an older version) is downloaded again.
+- Updates delete the Basalt UI's code with the rest of `/cc-ai/lib`, so the next start of the Basalt UI downloads it from the new commit. They leave `/cc-ai/vendor` in place, unless the new files fit on the disk only without it. Then the update deletes it before the download and says so, and the Basalt UI downloads it again the next time it starts.
+- If cc-code cannot get or load the files, or the Basalt UI fails before its session starts, cc-code shows one line with the reason and starts the TUI. Typical reasons: the HTTP API is disabled, a download failed, the file is another Basalt build, the disk is too full, or a file has a load error. An error after the session has started ends cc-code.
+- Holding Ctrl+T during the download stops cc-code.
+
+Like the TUI, the Basalt UI needs a screen of at least 20x8. On a smaller screen, cc-code uses terminal mode. It keeps the TUI's theme colours on advanced computers and uses plain colours on other computers. Shell commands (`!cmd` and the `shell` tool) run with the normal palette, as in the TUI.
+
+**Type-ahead.** While the model works, you can type your next prompt. Enter queues it, and cc-code sends it when the turn ends, also when the turn ended with an error. If you stop the turn with Ctrl+T, nothing more is sent, and the oldest queued prompt goes back into the input line if the line is empty. A queued `/exit` ends the session when its turn comes: the prompts queued before it are still sent, and the prompts queued after it are not. PageUp/PageDown and the mouse wheel still scroll the conversation. While the `shell` tool runs, your keys go to the prompt, because the hidden program never gets your input. While a `!<command>` runs, your keys go to the command, because it may read input.
+
+**Ctrl+T** works as in the TUI. During a turn it cancels the request. While a program runs, the first Ctrl+T stops the program and a second one abandons it. At the prompt, Ctrl+T clears the typed text, and at an empty prompt it exits cc-code.
+
+**Differences from the TUI.** The layout, the keys (history, Tab and the command popup, PageUp/PageDown, Ctrl+Up/Down/Home/End, Ctrl+Left/Right, Home/End), the status bar and the tool lines work as in the TUI. These things differ:
+- **Typing during a turn.** During a model wait or the `shell` tool, keys go to the input line, with history, the popup and Tab completion; the TUI ignores them. Enter puts the line into the history at once and queues it, and the status bar shows `[N queued]` on the right (when the bar is too narrow, the other parts are dropped first). Queued prompts are sent one turn each, in order. A Ctrl+T still held from the turn before does not cancel the queued prompt that starts after it.
+- **Ctrl+T with queued prompts.** Nothing more is sent. The oldest queued prompt goes back into the input line (if it is empty), and a dim line says `(The queued prompt was not sent.)` or `(N queued prompts were not sent.)`. Up recalls all of them from the history.
+- **`/exit` typed ahead** ends the session when its turn comes. Prompts queued before it are still sent, each in its own turn; prompts queued after it are not sent.
+- **During a `!command`** the keys go only to the command, as in the TUI. The input line keeps its text but shows no cursor. The mouse wheel still scrolls the conversation and resizes are handled; the TUI loses both while a command or the `shell` tool runs.
+- **Mouse.** Clicks never take the keys away from the input line. Clicking a popup row picks it, like Enter after Tab, and clicking the input line moves its cursor. The wheel over the popup scrolls its list; anywhere else it scrolls the conversation by 3 rows.
+- **Completion errors.** A command completion that fails shows no entries. In the TUI it ends cc-code.
+- **Looks.** In the popup, the description column has the row's colour instead of the dim colour (a Basalt list has one colour per row). When the input is wider than the line, the cursor stays at the right edge; the TUI keeps up to 10 cells of text to its right. The cursor also blinks during turns, because you can type ahead.
+- **Palette.** Basalt puts the theme's colours into whichever palette slots are free, so a colour has no fixed slot (in the TUI the background is always the black slot). While a shell command runs, the normal palette is back and the UI draws in the nearest standard colours. After each shell command the whole screen is drawn again, in case the program drew on the real screen.
+- **Speed.** Only the rows that changed are sent to the screen, while the TUI redraws all of it each time. Even so, the Basalt UI needs more time per keystroke or new line (in the emulator at 100x50 in colour, about 0.8 ms per keystroke against 0.2 ms).
+
+Not checked yet: the Basalt UI on a monitor, its speed and behaviour in-game (with and without the Unicode mod), and a screen made smaller than 20x8 while it runs.
+
 ### Terminal Mode
 
 Forced with `-t`, and used automatically on screens too small for the TUI. Features:
@@ -175,6 +210,7 @@ API keys are stored as settings with the `set` program. They're saved in `/.sett
 | `cc-code.max_steps` | Most model requests (tool steps) per prompt (default 25) |
 | `cc-code.max_output_tokens` | Output token cap per reply. Default: none for the custom provider (thinking models count their reasoning against it), 4096 for the others |
 | `cc-code.tools` | How tool calls are shown: `short` (default), `full` or `off`. `/tools` sets it |
+| `cc-code.ui` | The full-screen UI: `tui` (default) or `basalt` (the Basalt UI, a trial, downloaded on first use). `cc-code --basalt` and `--tui` override it for one run |
 
 ### System prompt
 
@@ -304,8 +340,24 @@ Run interactive session.
 occode.run({
   model = "openai/gpt-4o",
   forceTerminal = false,
+  basalt = true,  -- the Basalt UI; false: the TUI; nil: the cc-code.ui setting
 })
 ```
+
+When the Basalt UI can't be loaded, or fails before its session starts, `occode.run` prints one line with the reason and runs the TUI. An error later in the session is raised.
+
+### Session pieces (for UIs)
+
+The TUI and terminal UIs run in `occode.run`'s own loop. The Basalt UI has its own event loop, and uses the same pieces through these functions:
+
+| Function | What it does |
+|----------|--------------|
+| `occode.startSession(ui, config)` | Runs `agent.init(config)` and `ui.init(config)`, and sets the palette hooks for shell commands (`ui.suspendTheme` / `ui.resumeTheme`). Gives the UI the tool display mode and the skill commands. Prints the welcome lines, the `cc-code.model` warning and the skill problems |
+| `occode.turnCallbacks(ui)` | The callbacks for `agent.process(input, callbacks)`: the status (wait time, step, `Running <tool>...`), events received during the model wait (`ui.handleEvent`), and the tool lines. `ui.setStatus` and `ui.handleEvent` must not yield |
+| `occode.showResult(ui, result)` | Shows what `agent.process` returned: `/exit` (calls `ui.stop`), `/clear`, `/tools`, errors, direct output, the reply with its notice, the warnings, and a blank line |
+| `occode.endSession(ui)` | Removes the palette hooks, calls `ui.cleanup()`, and prints `Goodbye!` |
+
+The Basalt UI's object (`cc-code.basalt.ui`) has no `readInput`, and its `handleEvent` does nothing: its event loop (`cc-code.basalt.app`) gives every event to the UI itself.
 
 ### occode.exec(prompt, config)
 
